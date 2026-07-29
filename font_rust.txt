@@ -1,0 +1,3 @@
+// Full VGA font 8x16 (2048 bytes)
+static FONT8X16: [u8; 128 * 16] = [
+];
