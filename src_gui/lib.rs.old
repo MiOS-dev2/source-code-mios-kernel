@@ -1,0 +1,3568 @@
+#![no_std]
+#![allow(dead_code)]
+#![feature(abi_x86_interrupt)]
+#![allow(static_mut_refs)]
+
+mod vga;
+mod vesa;
+mod multiboot;
+mod keyboard;
+mod shell;
+mod commands;
+mod ata;
+mod fs;
+mod console;
+mod vesa_gui;
+mod utils;
+mod graphics;
+mod gui;
+mod wm;
+mod wm2;
+mod tamzen_font;
+mod idt;
+mod mouse;
+mod bmp;
+mod users;
+mod apps;
+
+use core::panic::PanicInfo;
+use core::str;
+use multiboot::MultibootInfo;
+use graphics::{Graphics, Color};
+use wm::{WindowManager, WindowState};
+use bmp::BmpImage;
+use ata::AtaDrive;
+
+pub static mut VESA_INFO: Option<vesa::VesaInfo> = None;
+
+fn num_to_str(num: usize) -> &'static str {
+    static mut BUF: [u8; 10] = [0; 10];
+    unsafe {
+        let mut temp = num;
+        let mut digits = [0u8; 10];
+        let mut i = 0;
+        if temp == 0 {
+            BUF[0] = b'0';
+            BUF[1] = 0;
+            return "0";
+        }
+        while temp > 0 {
+            digits[i] = b'0' + (temp % 10) as u8;
+            temp /= 10;
+            i += 1;
+        }
+        let mut j = 0;
+        while i > 0 {
+            i -= 1;
+            BUF[j] = digits[i];
+            j += 1;
+        }
+        BUF[j] = 0;
+        core::str::from_utf8(&BUF[..j]).unwrap_or("0")
+    }
+}
+
+// ATA диск
+static mut ATA_DRIVE: AtaDrive = AtaDrive::new();
+static mut ATA_MOUNTED: bool = false;
+static mut ATA_CURRENT_DIR: [u8; 256] = [0; 256];
+static mut ATA_DIR_ENTRIES: [[u8; 32]; 64] = [[0; 32]; 64];
+static mut ATA_DIR_COUNT: usize = 0;
+static mut ATA_FILE_DATA: [[u8; 512]; 16] = [[0; 512]; 16];
+static mut ATA_FILE_SIZES: [usize; 16] = [0; 16];
+static mut ATA_FILE_COUNT: usize = 0;
+
+// BMP изображения
+#[link_section = ".rodata"]
+#[used]
+static IMG_BMP: &[u8] = include_bytes!("img.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IMG2_BMP: &[u8] = include_bytes!("img2.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IMG3_BMP: &[u8] = include_bytes!("img3.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IC_BMP: &[u8] = include_bytes!("ic.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IC0_BMP: &[u8] = include_bytes!("ic0.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IC1_BMP: &[u8] = include_bytes!("ic1.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IC2_BMP: &[u8] = include_bytes!("ic2.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IC3_BMP: &[u8] = include_bytes!("ic3.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IC4_BMP: &[u8] = include_bytes!("ic4.bmp");
+#[link_section = ".rodata"]
+#[used]
+static IC5_BMP: &[u8] = include_bytes!("ic5.bmp");
+#[link_section = ".rodata"]
+#[used]
+static ABOUT_BMP: &[u8] = include_bytes!("about.bmp");
+#[link_section = ".rodata"]
+#[used]
+static FOLDER_BMP: &[u8] = include_bytes!("folder.bmp");
+#[link_section = ".rodata"]
+#[used]
+static FILE_BMP: &[u8] = include_bytes!("file.bmp");
+#[link_section = ".rodata"]
+#[used]
+static TOOL_BMP: &[u8] = include_bytes!("tool.bmp");
+#[link_section = ".rodata"]
+#[used]
+static LOGIN_BMP: &[u8] = include_bytes!("login.bmp");
+
+static mut WALLPAPER: Color = Color::rgb(5, 148, 0);
+static mut USE_BMP_WALLPAPER: bool = true;
+static mut BMP_IMAGE: Option<BmpImage> = None;
+static mut BMP_IMAGE2: Option<BmpImage> = None;
+static mut BMP_IMAGE3: Option<BmpImage> = None;
+static mut CURRENT_BMP_INDEX: usize = 0;
+static mut LOGIN_IMAGE: Option<BmpImage> = None;
+
+static mut ICON_TERMINAL: Option<BmpImage> = None;
+static mut ICON_FILES: Option<BmpImage> = None;
+static mut ICON_SETTINGS: Option<BmpImage> = None;
+static mut ICON_ABOUT: Option<BmpImage> = None;
+static mut ICON_NOTEPAD: Option<BmpImage> = None;
+static mut ICON_SNAKE: Option<BmpImage> = None;
+static mut ICON_PAINT: Option<BmpImage> = None;
+static mut ICON_FOLDER: Option<BmpImage> = None;
+static mut ICON_FILE: Option<BmpImage> = None;
+static mut ICON_TOOL: Option<BmpImage> = None;
+static mut ABOUT_IMAGE: Option<BmpImage> = None;
+
+static mut THEME_IDX: usize = 0;
+static mut USE_WM2_THEME: bool = false;
+static mut TERM_HISTORY: [[u8; 80]; 20] = [[b' '; 80]; 20];
+static mut TERM_HIST_LEN: usize = 0;
+static mut NOTEPAD_TEXT: [u8; 1024] = [0; 1024];
+static mut NOTEPAD_LEN: usize = 0;
+static mut SAVED_DOCUMENTS: [[u8; 512]; 5] = [[0; 512]; 5];
+static mut SAVED_DOCUMENTS_LEN: [usize; 5] = [0; 5];
+static mut SAVED_DOCUMENTS_COUNT: usize = 0;
+static mut WALLPAPER_SELECTOR_OPEN: bool = false;
+static mut THEME_SELECTOR_OPEN: bool = false;
+static mut DOCUMENT_MANAGER_OPEN: bool = false;
+static mut DOCUMENT_MANAGER_MODE: u8 = 0;
+static mut GRADIENT_TOP_ACTIVE: Color = Color::rgb(90, 90, 90);
+static mut GRADIENT_BOTTOM_ACTIVE: Color = Color::rgb(20, 20, 20);
+static mut GRADIENT_TOP_INACTIVE: Color = Color::rgb(105, 105, 105);
+static mut GRADIENT_BOTTOM_INACTIVE: Color = Color::rgb(50, 50, 50);
+static mut LOGGED_IN: bool = false;
+
+// Переменные для системы пользователей
+static mut USER_LOGIN_ATTEMPTS: usize = 0;
+static mut USER_LOGIN_LOCKED: bool = false;
+
+// Переменные для экрана входа
+static mut LOGIN_USERNAME_INPUT: [u8; 32] = [0; 32];
+static mut LOGIN_USERNAME_LEN: usize = 0;
+static mut LOGIN_PASSWORD_INPUT: [u8; 32] = [0; 32];
+static mut LOGIN_PASSWORD_LEN: usize = 0;
+static mut LOGIN_IS_PASSWORD: bool = false;
+static mut LOGIN_ERROR_MSG: [u8; 64] = [0; 64];
+static mut LOGIN_ERROR_LEN: usize = 0;
+
+// Переменные для PAINT
+static mut PAINT_CANVAS: [[u32; 400]; 300] = [[0; 400]; 300];
+static mut PAINT_COLOR: u32 = 0x000000;
+static mut PAINT_PEN_SIZE: usize = 1;
+static mut PAINT_TOOL: u8 = 0;
+static mut PAINT_PREV_X: usize = 0;
+static mut PAINT_PREV_Y: usize = 0;
+static mut PAINT_IS_DRAWING: bool = false;
+static mut PAINT_RECT_START_X: usize = 0;
+static mut PAINT_RECT_START_Y: usize = 0;
+static mut PAINT_RECT_END_X: usize = 0;
+static mut PAINT_RECT_END_Y: usize = 0;
+static mut PAINT_CANVAS_BACKUP: [[u32; 400]; 300] = [[0; 400]; 300];
+
+static mut SAVED_PAINTINGS: [[[u32; 400]; 300]; 5] = [[[0; 400]; 300]; 5];
+static mut SAVED_PAINTINGS_COUNT: usize = 0;
+
+static mut CURRENT_FS_SECTION: usize = 0;
+static mut CONTEXT_MENU_OPEN: bool = false;
+static mut CONTEXT_MENU_X: usize = 0;
+static mut CONTEXT_MENU_Y: usize = 0;
+
+static mut NAME_INPUT_OPEN: bool = false;
+static mut NAME_INPUT_BUFFER: [u8; 64] = [0; 64];
+static mut NAME_INPUT_LEN: usize = 0;
+static mut NAME_INPUT_CALLBACK: Option<fn(&str)> = None;
+static mut NAME_INPUT_X: usize = 0;
+static mut NAME_INPUT_Y: usize = 0;
+static mut NAME_INPUT_MODE: u8 = 0;
+static mut NAME_INPUT_FOLDER_INDEX: usize = 0;
+
+static mut DESKTOP_FOLDERS: [[u8; 64]; 10] = [[0; 64]; 10];
+static mut DESKTOP_FOLDERS_COUNT: usize = 0;
+static mut FOLDER_FILES: [[[u8; 64]; 20]; 10] = [[[0; 64]; 20]; 10];
+static mut FOLDER_FILES_COUNT: [usize; 10] = [0; 10];
+static mut FOLDER_FILE_CONTENTS: [[[u8; 1024]; 20]; 10] = [[[0; 1024]; 20]; 10];
+static mut FOLDER_FILE_LENS: [[usize; 20]; 10] = [[0; 20]; 10];
+
+static mut TUTORIAL_OPEN: bool = false;
+static mut TUTORIAL_STEP: usize = 0;
+
+// ========== ДЛЯ ПРИЛОЖЕНИЙ ==========
+static mut APP_RESULT: [u8; 256] = [0; 256];
+
+// ========== ДЛЯ CRE TOOL ==========
+static mut GUI_ELEMENTS: [apps::GuiElement; 16] = [apps::GuiElement {
+    x: 0, y: 0, w: 0, h: 0,
+    kind: 0,
+    text: [0; 64],
+    text_len: 0,
+    visible: false,
+}; 16];
+static mut GUI_ELEMENTS_COUNT: usize = 0;
+static mut SELECTED_ELEMENT: usize = 0;
+static mut DRAG_STATE: u8 = 0;
+static mut DRAG_OFFSET_X: i32 = 0;
+static mut DRAG_OFFSET_Y: i32 = 0;
+static mut APP_PREVIEW_RUNNING: bool = false;
+
+// ========== ДЛЯ PREVIEW ПРИЛОЖЕНИЙ ==========
+static mut PREVIEW_ELEMENTS: [apps::GuiElement; 16] = [apps::GuiElement {
+    x: 0, y: 0, w: 0, h: 0,
+    kind: 0,
+    text: [0; 64],
+    text_len: 0,
+    visible: false,
+}; 16];
+static mut PREVIEW_ELEMENTS_COUNT: usize = 0;
+static mut PREVIEW_WINDOW_INDEX: usize = 0;
+static mut PREVIEW_RUNNING: bool = false;
+
+static mut DRAG_ELEMENT_INDEX: usize = 0;
+static mut DRAG_ACTIVE: bool = false;
+static mut DRAG_OFFSET_X: i32 = 0;
+static mut DRAG_OFFSET_Y: i32 = 0;
+static mut RESIZE_ACTIVE: bool = false;
+static mut RESIZE_ELEMENT_INDEX: usize = 0;
+
+// ====== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======
+fn draw_line_on_canvas(x1: usize, y1: usize, x2: usize, y2: usize, color: u32) {
+    unsafe {
+        let mut x = x1 as i32;
+        let mut y = y1 as i32;
+        let dx = (x2 as i32 - x1 as i32).abs();
+        let dy = -(y2 as i32 - y1 as i32).abs();
+        let sx = if x1 < x2 { 1 } else { -1 };
+        let sy = if y1 < y2 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            if x >= 0 && x < 400 && y >= 0 && y < 300 {
+                PAINT_CANVAS[y as usize][x as usize] = color;
+            }
+            if x == x2 as i32 && y == y2 as i32 { break; }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+}
+
+fn draw_rect_on_canvas(x1: usize, y1: usize, x2: usize, y2: usize, color: u32) {
+    unsafe {
+        let start_x = if x1 < x2 { x1 } else { x2 };
+        let end_x = if x1 > x2 { x1 } else { x2 };
+        let start_y = if y1 < y2 { y1 } else { y2 };
+        let end_y = if y1 > y2 { y1 } else { y2 };
+        
+        for y in start_y..=end_y {
+            for x in start_x..=end_x {
+                if x < 400 && y < 300 {
+                    PAINT_CANVAS[y][x] = color;
+                }
+            }
+        }
+    }
+}
+
+fn mount_ata_drive(vga: &mut crate::vga::VGA) {
+    unsafe {
+        let mut drive = AtaDrive::new();
+        drive.init(vga);
+        
+        if drive.exists {
+            ATA_DRIVE = drive;
+            ATA_MOUNTED = true;
+            vga.write_string("[ATA] Drive mounted successfully!\n");
+            vga.write_string("[ATA] Model: ");
+            for i in 0..40 {
+                if ATA_DRIVE.model[i] != 0 && ATA_DRIVE.model[i] != 0x20 {
+                    vga.put_char(ATA_DRIVE.model[i] as char);
+                }
+            }
+            vga.write_string("\n[ATA] Sectors: ");
+            vga.write_number(ATA_DRIVE.sectors as usize);
+            vga.write_string("\n");
+            
+            let mut buffer = [0u8; 512];
+            if ATA_DRIVE.read_sector(1, &mut buffer) {
+                parse_ata_directory(&buffer);
+            }
+        } else {
+            vga.write_string("[ATA] No ATA drive detected!\n");
+        }
+    }
+}
+
+fn parse_ata_directory(data: &[u8; 512]) {
+    unsafe {
+        ATA_DIR_COUNT = 0;
+        let mut offset = 0;
+        
+        while offset < 512 && ATA_DIR_COUNT < 64 {
+            if data[offset] != 0 {
+                let name_len = data[offset] as usize;
+                if name_len > 0 && name_len <= 31 {
+                    let start = offset + 1;
+                    for i in 0..name_len {
+                        if start + i < 512 {
+                            ATA_DIR_ENTRIES[ATA_DIR_COUNT][i] = data[start + i];
+                        }
+                    }
+                    ATA_DIR_COUNT += 1;
+                    offset += 1 + name_len + 4;
+                } else {
+                    offset += 1;
+                }
+            } else {
+                offset += 1;
+            }
+        }
+    }
+}
+
+fn read_ata_file(filename: &str, buffer: &mut [u8]) -> usize {
+    unsafe {
+        if !ATA_MOUNTED { return 0; }
+        
+        for i in 0..ATA_DIR_COUNT {
+            let entry_name = str::from_utf8(&ATA_DIR_ENTRIES[i]).unwrap_or("");
+            let entry_name_trimmed = entry_name.trim_end_matches('\0');
+            
+            if entry_name_trimmed == filename {
+                let mut sector_buf = [0u8; 512];
+                if ATA_DRIVE.read_sector(2 + i as u32, &mut sector_buf) {
+                    let size = sector_buf[0] as usize;
+                    let copy_len = if size > buffer.len() { buffer.len() } else { size };
+                    buffer[..copy_len].copy_from_slice(&sector_buf[1..1 + copy_len]);
+                    return copy_len;
+                }
+                return 0;
+            }
+        }
+        0
+    }
+}
+
+fn write_ata_file(filename: &str, data: &[u8]) -> bool {
+    unsafe {
+        if !ATA_MOUNTED { return false; }
+        
+        for i in 0..ATA_DIR_COUNT {
+            let entry_name = str::from_utf8(&ATA_DIR_ENTRIES[i]).unwrap_or("");
+            if entry_name.trim_end_matches('\0') == filename {
+                let mut sector_buf = [0u8; 512];
+                let size = if data.len() > 511 { 511 } else { data.len() };
+                sector_buf[0] = size as u8;
+                sector_buf[1..1 + size].copy_from_slice(&data[..size]);
+                return ATA_DRIVE.write_sector(2 + i as u32, &sector_buf);
+            }
+        }
+        
+        if ATA_DIR_COUNT < 64 {
+            let name_bytes = filename.as_bytes();
+            let name_len = if name_bytes.len() > 31 { 31 } else { name_bytes.len() };
+            ATA_DIR_ENTRIES[ATA_DIR_COUNT][..name_len].copy_from_slice(&name_bytes[..name_len]);
+            ATA_DIR_COUNT += 1;
+            
+            let mut dir_buf = [0u8; 512];
+            let mut offset = 0;
+            for i in 0..ATA_DIR_COUNT {
+                let name_len = str::from_utf8(&ATA_DIR_ENTRIES[i]).unwrap_or("").trim_end_matches('\0').len();
+                dir_buf[offset] = name_len as u8;
+                offset += 1;
+                for j in 0..name_len {
+                    dir_buf[offset + j] = ATA_DIR_ENTRIES[i][j];
+                }
+                offset += name_len;
+                dir_buf[offset] = 0;
+                dir_buf[offset + 1] = 0;
+                dir_buf[offset + 2] = 0;
+                dir_buf[offset + 3] = 0;
+                offset += 4;
+            }
+            ATA_DRIVE.write_sector(1, &dir_buf);
+            
+            let mut file_buf = [0u8; 512];
+            let size = if data.len() > 511 { 511 } else { data.len() };
+            file_buf[0] = size as u8;
+            file_buf[1..1 + size].copy_from_slice(&data[..size]);
+            return ATA_DRIVE.write_sector(2 + ATA_DIR_COUNT as u32 - 1, &file_buf);
+        }
+        false
+    }
+}
+
+fn list_ata_files() -> &'static str {
+    unsafe {
+        if !ATA_MOUNTED {
+            return "ATA drive not mounted!";
+        }
+        
+        static mut RESULT: [u8; 512] = [0; 512];
+        let mut pos = 0;
+        
+        let header = b"Files on SATA drive:\n";
+        for i in 0..header.len() {
+            if pos < 511 { RESULT[pos] = header[i]; pos += 1; }
+        }
+        
+        for i in 0..ATA_DIR_COUNT {
+            let name = core::str::from_utf8(&ATA_DIR_ENTRIES[i]).unwrap_or("");
+            let name_trimmed = name.trim_end_matches('\0');
+            for b in name_trimmed.bytes() {
+                if pos < 511 { RESULT[pos] = b; pos += 1; }
+            }
+            if pos < 511 { RESULT[pos] = b'\n'; pos += 1; }
+        }
+        
+        RESULT[pos] = 0;
+        core::str::from_utf8(&RESULT[..pos]).unwrap_or("")
+    }
+}
+
+fn draw_icon(gfx: &mut Graphics, x: usize, y: usize, icon: &Option<BmpImage>, size: usize) {
+    if let Some(ref bmp) = icon {
+        let row_size = ((bmp.width * 3 + 3) / 4) * 4;
+        for dy in 0..size.min(bmp.height) {
+            let bmp_y = (bmp.height - 1).saturating_sub(dy);
+            let bmp_row_start = bmp_y * row_size;
+            for dx in 0..size.min(bmp.width) {
+                let pixel_offset = bmp_row_start + dx * 3;
+                if pixel_offset + 2 < bmp.data.len() {
+                    let b = bmp.data[pixel_offset] as u32;
+                    let g = bmp.data[pixel_offset + 1] as u32;
+                    let r = bmp.data[pixel_offset + 2] as u32;
+                    let color = (r << 16) | (g << 8) | b;
+                    if color != 0xFF00FF {
+                        gfx.put_pixel(x + dx, y + dy, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn draw_folder_icon(gfx: &mut Graphics, x: usize, y: usize, name: &str) {
+    let icon_size = 64;
+    let folder_icon = unsafe { &ICON_FOLDER };
+    draw_icon(gfx, x, y, folder_icon, icon_size);
+    
+    let display_name = if name.len() > 10 { &name[..10] } else { name };
+    let text_x = x + (icon_size - display_name.len() * 8) / 2;
+    gfx.draw_text(text_x, y + icon_size + 5, display_name, Color::WHITE.to_u32(), Color::rgb(0, 0, 0).to_u32());
+}
+
+fn draw_file_icon(gfx: &mut Graphics, x: usize, y: usize, name: &str) {
+    let icon_size = 32;
+    let file_icon = unsafe { &ICON_FILE };
+    draw_icon(gfx, x, y, file_icon, icon_size);
+    
+    let display_name = if name.len() > 12 { &name[..12] } else { name };
+    let text_x = x + (icon_size - display_name.len() * 8) / 2;
+    gfx.draw_text(text_x, y + icon_size + 3, display_name, Color::BLACK.to_u32(), Color::rgb(235, 235, 235).to_u32());
+}
+
+fn draw_line(gfx: &mut Graphics, x1: usize, y1: usize, x2: usize, y2: usize, color: u32) {
+    let mut x = x1 as i32;
+    let mut y = y1 as i32;
+    let dx = (x2 as i32 - x1 as i32).abs();
+    let dy = -(y2 as i32 - y1 as i32).abs();
+    let sx = if x1 < x2 { 1 } else { -1 };
+    let sy = if y1 < y2 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x >= 0 && x < gfx.width as i32 && y >= 0 && y < gfx.height as i32 {
+            gfx.put_pixel(x as usize, y as usize, color);
+        }
+        if x == x2 as i32 && y == y2 as i32 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+fn draw_context_menu(gfx: &mut Graphics, x: usize, y: usize) {
+    let menu_w = 160;
+    let menu_h = 112;
+    let menu_items = ["Terminal", "AboutOS", "Settings", "Create Folder"];
+
+    let mut menu_x = x;
+    let mut menu_y = y;
+    if menu_x + menu_w > gfx.width {
+        menu_x = gfx.width - menu_w;
+    }
+    if menu_y + menu_h > gfx.height {
+        menu_y = gfx.height - menu_h;
+    }
+
+    gfx.fill_rect(menu_x, menu_y, menu_w, menu_h, Color::rgb(240, 240, 240).to_u32());
+    gfx.draw_rect_border(menu_x, menu_y, menu_w, menu_h, Color::rgb(87, 87, 87).to_u32());
+    gfx.draw_rect_border(menu_x + 1, menu_y + 1, menu_w - 2, menu_h - 2, Color::WHITE.to_u32());
+
+    for (i, item) in menu_items.iter().enumerate() {
+        let item_y = menu_y + 4 + i * 24;
+        gfx.draw_text(menu_x + 8, item_y + 4, item, Color::BLACK.to_u32(), Color::rgb(240, 240, 240).to_u32());
+
+        if i < menu_items.len() - 1 {
+            gfx.fill_rect(menu_x + 4, item_y + 22, menu_w - 8, 1, Color::rgb(200, 200, 200).to_u32());
+        }
+    }
+    
+    unsafe {
+        CONTEXT_MENU_OPEN = true;
+        CONTEXT_MENU_X = menu_x;
+        CONTEXT_MENU_Y = menu_y;
+    }
+}
+
+fn show_name_input_dialog(gfx: &mut Graphics, callback: fn(&str), mode: u8, folder_index: usize) {
+    unsafe {
+        NAME_INPUT_OPEN = true;
+        NAME_INPUT_BUFFER = [0; 64];
+        NAME_INPUT_LEN = 0;
+        NAME_INPUT_CALLBACK = Some(callback);
+        NAME_INPUT_MODE = mode;
+        NAME_INPUT_FOLDER_INDEX = folder_index;
+        
+        let screen_w = gfx.width;
+        let screen_h = gfx.height;
+        NAME_INPUT_X = (screen_w - 300) / 2;
+        NAME_INPUT_Y = (screen_h - 150) / 2;
+    }
+}
+
+fn draw_name_input_dialog(gfx: &mut Graphics) {
+    unsafe {
+        if !NAME_INPUT_OPEN { return; }
+        
+        let dialog_w = 300;
+        let dialog_h = 150;
+        let dialog_x = NAME_INPUT_X;
+        let dialog_y = NAME_INPUT_Y;
+        let title = if NAME_INPUT_MODE == 0 { "Create Folder" } else { "Save File" };
+        
+        gfx.fill_rect(dialog_x, dialog_y, dialog_w, dialog_h, Color::rgb(235, 235, 235).to_u32());
+        gfx.draw_rect_border(dialog_x, dialog_y, dialog_w, dialog_h, Color::rgb(87, 87, 87).to_u32());
+        gfx.draw_rect_border(dialog_x + 1, dialog_y + 1, dialog_w - 2, dialog_h - 2, Color::WHITE.to_u32());
+        
+        let title_bar_h = 30;
+        gfx.fill_rect(dialog_x + 2, dialog_y + 2, dialog_w - 4, title_bar_h, Color::rgb(90, 90, 90).to_u32());
+        gfx.draw_text(dialog_x + 10, dialog_y + 6, title, Color::WHITE.to_u32(), Color::rgb(90, 90, 90).to_u32());
+        
+        let prompt = if NAME_INPUT_MODE == 0 { "Folder name:" } else { "File name:" };
+        gfx.draw_text(dialog_x + 20, dialog_y + 50, prompt, Color::BLACK.to_u32(), Color::rgb(235, 235, 235).to_u32());
+        
+        gfx.fill_rect(dialog_x + 20, dialog_y + 70, 260, 24, Color::WHITE.to_u32());
+        gfx.draw_rect_border(dialog_x + 20, dialog_y + 70, 260, 24, Color::rgb(128, 128, 128).to_u32());
+        
+        let name_str = core::str::from_utf8(&NAME_INPUT_BUFFER[..NAME_INPUT_LEN]).unwrap_or("");
+        gfx.draw_text(dialog_x + 25, dialog_y + 74, name_str, Color::BLACK.to_u32(), Color::WHITE.to_u32());
+        
+        wm::draw_raised_rect(gfx, dialog_x + 60, dialog_y + 110, 80, 25);
+        gfx.draw_text(dialog_x + 85, dialog_y + 115, "OK", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+        
+        wm::draw_raised_rect(gfx, dialog_x + 160, dialog_y + 110, 80, 25);
+        gfx.draw_text(dialog_x + 182, dialog_y + 115, "Cancel", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+    }
+}
+
+fn handle_name_input_click(cursor_x: usize, cursor_y: usize) -> bool {
+    unsafe {
+        if !NAME_INPUT_OPEN { return false; }
+        
+        let dialog_x = NAME_INPUT_X;
+        let dialog_y = NAME_INPUT_Y;
+        
+        if cursor_x >= dialog_x + 60 && cursor_x <= dialog_x + 140 &&
+           cursor_y >= dialog_y + 110 && cursor_y <= dialog_y + 135 {
+            
+            if let Some(callback) = NAME_INPUT_CALLBACK {
+                let name_str = core::str::from_utf8(&NAME_INPUT_BUFFER[..NAME_INPUT_LEN]).unwrap_or("");
+                if name_str.len() > 0 {
+                    callback(name_str);
+                }
+            }
+            NAME_INPUT_OPEN = false;
+            return true;
+        }
+        
+        if cursor_x >= dialog_x + 160 && cursor_x <= dialog_x + 240 &&
+           cursor_y >= dialog_y + 110 && cursor_y <= dialog_y + 135 {
+            NAME_INPUT_OPEN = false;
+            return true;
+        }
+        
+        false
+    }
+}
+
+fn create_folder_on_desktop(name: &str) {
+    if name.is_empty() { return; }
+    
+    unsafe {
+        if DESKTOP_FOLDERS_COUNT < 10 {
+            let name_bytes = name.as_bytes();
+            let copy_len = if name_bytes.len() > 63 { 63 } else { name_bytes.len() };
+            DESKTOP_FOLDERS[DESKTOP_FOLDERS_COUNT][..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+            DESKTOP_FOLDERS[DESKTOP_FOLDERS_COUNT][copy_len] = 0;
+            DESKTOP_FOLDERS_COUNT += 1;
+        }
+    }
+}
+
+fn save_file_to_folder(name: &str) {
+    unsafe {
+        let folder_index = NAME_INPUT_FOLDER_INDEX;
+        if folder_index < DESKTOP_FOLDERS_COUNT {
+            let file_count = FOLDER_FILES_COUNT[folder_index];
+            if file_count < 20 {
+                let name_bytes = name.as_bytes();
+                let copy_len = if name_bytes.len() > 63 { 63 } else { name_bytes.len() };
+                FOLDER_FILES[folder_index][file_count][..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+                FOLDER_FILES[folder_index][file_count][copy_len] = 0;
+                
+                let content_len = if NOTEPAD_LEN > 1024 { 1024 } else { NOTEPAD_LEN };
+                FOLDER_FILE_CONTENTS[folder_index][file_count][..content_len].copy_from_slice(&NOTEPAD_TEXT[..content_len]);
+                FOLDER_FILE_LENS[folder_index][file_count] = content_len;
+                
+                FOLDER_FILES_COUNT[folder_index] += 1;
+            }
+        }
+    }
+}
+
+fn open_folder_window(wm: &mut WindowManager, folder_name: &str, folder_index: usize) {
+    static mut FOLDER_TITLE: [u8; 64] = [0; 64];
+    unsafe {
+        let name_bytes = folder_name.as_bytes();
+        let copy_len = if name_bytes.len() > 63 { 63 } else { name_bytes.len() };
+        FOLDER_TITLE[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        FOLDER_TITLE[copy_len] = 0;
+        let title = core::str::from_utf8(&FOLDER_TITLE[..copy_len]).unwrap_or("Folder");
+        wm.create_window(title, 150, 120, 400, 300);
+        CURRENT_OPEN_FOLDER = folder_index;
+    }
+}
+
+static mut CURRENT_OPEN_FOLDER: usize = 0;
+
+fn open_file_from_folder(wm: &mut WindowManager, folder_index: usize, file_index: usize) {
+    unsafe {
+        let content_len = FOLDER_FILE_LENS[folder_index][file_index];
+        let content = &FOLDER_FILE_CONTENTS[folder_index][file_index][..content_len];
+        NOTEPAD_TEXT[..content_len].copy_from_slice(content);
+        NOTEPAD_LEN = content_len;
+        wm.create_window("Notepad", 100, 100, 500, 400);
+    }
+}
+
+fn open_ata_file_in_notepad(wm: &mut WindowManager, filename: &str) {
+    unsafe {
+        let mut buffer = [0u8; 512];
+        let size = read_ata_file(filename, &mut buffer);
+        if size > 0 {
+            NOTEPAD_TEXT[..size].copy_from_slice(&buffer[..size]);
+            NOTEPAD_LEN = size;
+            wm.create_window("Notepad", 100, 100, 500, 400);
+        }
+    }
+}
+
+fn show_blue_screen_of_death(gfx: &mut Graphics) -> ! {
+    gfx.clear(Color::rgb(0, 0, 128).to_u32());
+    
+    let screen_w = gfx.width;
+    let screen_h = gfx.height;
+
+    let title = "Setop MiOS!";
+    let title_width = title.len() * tamzen_font::FONT_WIDTH;
+    let title_x = (screen_w - title_width) / 2;
+    let title_y = screen_h / 2 - 60;
+    gfx.draw_text(title_x, title_y, title, Color::WHITE.to_u32(), Color::rgb(0, 0, 128).to_u32());
+
+    let error_msg = "Error code: 00000x3";
+    let error_width = error_msg.len() * tamzen_font::FONT_WIDTH;
+    let error_x = (screen_w - error_width) / 2;
+    let error_y = screen_h / 2 - 20;
+    gfx.draw_text(error_x, error_y, error_msg, Color::WHITE.to_u32(), Color::rgb(0, 0, 128).to_u32());
+
+    let restart_msg = "Please restart you PC!";
+    let restart_width = restart_msg.len() * tamzen_font::FONT_WIDTH;
+    let restart_x = (screen_w - restart_width) / 2;
+    let restart_y = screen_h / 2 + 20;
+    gfx.draw_text(restart_x, restart_y, restart_msg, Color::WHITE.to_u32(), Color::rgb(0, 0, 128).to_u32());
+    
+    gfx.flush();
+    
+    loop {
+        unsafe { core::arch::asm!("hlt") }
+    }
+}
+
+fn show_blue_screen_stop_gui(gfx: &mut Graphics) -> ! {
+    gfx.clear(Color::rgb(0, 0, 128).to_u32());
+    
+    let screen_w = gfx.width;
+    let screen_h = gfx.height;
+    
+    let title = "GUI STOP!";
+    let title_width = title.len() * tamzen_font::FONT_WIDTH;
+    let title_x = (screen_w - title_width) / 2;
+    let title_y = screen_h / 2 - 60;
+    gfx.draw_text(title_x, title_y, title, Color::WHITE.to_u32(), Color::rgb(0, 0, 128).to_u32());
+    
+    let error_msg = "Error code: 00000x4c";
+    let error_width = error_msg.len() * tamzen_font::FONT_WIDTH;
+    let error_x = (screen_w - error_width) / 2;
+    let error_y = screen_h / 2 - 20;
+    gfx.draw_text(error_x, error_y, error_msg, Color::WHITE.to_u32(), Color::rgb(0, 0, 128).to_u32());
+    
+    let restart_msg = "GUI system halted. System stopped.";
+    let restart_width = restart_msg.len() * tamzen_font::FONT_WIDTH;
+    let restart_x = (screen_w - restart_width) / 2;
+    let restart_y = screen_h / 2 + 20;
+    gfx.draw_text(restart_x, restart_y, restart_msg, Color::WHITE.to_u32(), Color::rgb(0, 0, 128).to_u32());
+    
+    gfx.flush();
+    
+    loop {
+        unsafe { core::arch::asm!("hlt") }
+    }
+}
+
+fn draw_tutorial_window(gfx: &mut Graphics) {
+    unsafe {
+        if !TUTORIAL_OPEN { return; }
+        
+        let screen_w = gfx.width;
+        let screen_h = gfx.height;
+        
+        let win_w = 500;
+        let win_h = 370;
+        let win_x = (screen_w - win_w) / 2;
+        let win_y = (screen_h - win_h) / 2;
+        
+        gfx.fill_rect(win_x, win_y, win_w, win_h, Color::rgb(235, 235, 235).to_u32());
+        gfx.draw_rect_border(win_x, win_y, win_w, win_h, Color::rgb(87, 87, 87).to_u32());
+        gfx.draw_rect_border(win_x + 1, win_y + 1, win_w - 2, win_h - 2, Color::WHITE.to_u32());
+        
+        let title_bar_h = 30;
+        gfx.fill_rect(win_x + 2, win_y + 2, win_w - 4, title_bar_h, Color::rgb(90, 90, 90).to_u32());
+        gfx.draw_text(win_x + 10, win_y + 8, "Welcome to MiOS!", Color::WHITE.to_u32(), Color::rgb(90, 90, 90).to_u32());
+        
+        wm::draw_raised_rect(gfx, win_x + win_w - 25, win_y + 5, 20, 20);
+        gfx.draw_text(win_x + win_w - 19, win_y + 9, "X", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+        
+        match TUTORIAL_STEP {
+            0 => {
+                gfx.draw_text(win_x + 20, win_y + 60, "Welcome!", Color::BLACK.to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 20, win_y + 90, "Click the next button to get started.", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + win_w - 90, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + win_w - 65, win_y + win_h - 39, "Next", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+            }
+            1 => {
+                gfx.draw_text(win_x + 20, win_y + 60, "1 - New Aero-style interface", Color::rgb(0, 80, 0).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 90, "A new system interface! Those same Aero-style", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 110, "windows with that same transparent interface.", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + 20, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + 45, win_y + win_h - 39, "Prev", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + win_w - 90, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + win_w - 65, win_y + win_h - 39, "Next", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+            }
+            2 => {
+                gfx.draw_text(win_x + 20, win_y + 60, "2 - Customizing the OS", Color::rgb(0, 80, 0).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 90, "Go to settings, to change the wallpaper,", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 110, "click the corresponding button.", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + 20, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + 45, win_y + win_h - 39, "Prev", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + win_w - 90, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + win_w - 65, win_y + win_h - 39, "Next", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+            }
+            3 => {
+                gfx.draw_text(win_x + 20, win_y + 60, "3 - System terminal", Color::rgb(0, 80, 0).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 90, "The system terminal is a tool that allows you", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 110, "to manage the system! For full command", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 130, "access, enter the help command.", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + 20, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + 45, win_y + win_h - 39, "Prev", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + win_w - 90, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + win_w - 65, win_y + win_h - 39, "Next", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+            }
+            4 => {
+                gfx.draw_text(win_x + 20, win_y + 60, "4 - Creating folders on the desktop", Color::rgb(0, 80, 0).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 90, "There are two ways to create a folder.", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 120, "1 - Right-click on the desktop and select", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 140, "    Create new folder. Enter the folder's name", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 160, "    and click OK.", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 190, "2 - Open the terminal and enter the command", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                gfx.draw_text(win_x + 30, win_y + 210, "    new folder.", Color::rgb(80, 80, 80).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + 20, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + 45, win_y + win_h - 39, "Prev", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+                
+                wm::draw_raised_rect(gfx, win_x + win_w - 90, win_y + win_h - 45, 80, 25);
+                gfx.draw_text(win_x + win_w - 70, win_y + win_h - 39, "Finish", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn handle_tutorial_click(cursor_x: usize, cursor_y: usize) -> bool {
+    unsafe {
+        if !TUTORIAL_OPEN { return false; }
+        
+        let screen_w = 800;
+        let screen_h = 600;
+        let win_w = 500;
+        let win_h = 370;
+        let win_x = (screen_w - win_w) / 2;
+        let win_y = (screen_h - win_h) / 2;
+        
+        let close_x = win_x + win_w - 25;
+        if cursor_x >= close_x && cursor_x <= close_x + 20 &&
+           cursor_y >= win_y + 5 && cursor_y <= win_y + 25 {
+            TUTORIAL_OPEN = false;
+            return true;
+        }
+        
+        match TUTORIAL_STEP {
+            0 => {
+                let next_x = win_x + win_w - 90;
+                if cursor_x >= next_x && cursor_x <= next_x + 80 &&
+                   cursor_y >= win_y + win_h - 45 && cursor_y <= win_y + win_h - 20 {
+                    TUTORIAL_STEP = 1;
+                    return true;
+                }
+            }
+            1 | 2 | 3 => {
+                let prev_x = win_x + 20;
+                let next_x = win_x + win_w - 90;
+                
+                if cursor_x >= prev_x && cursor_x <= prev_x + 80 &&
+                   cursor_y >= win_y + win_h - 45 && cursor_y <= win_y + win_h - 20 {
+                    TUTORIAL_STEP -= 1;
+                    return true;
+                }
+                
+                if cursor_x >= next_x && cursor_x <= next_x + 80 &&
+                   cursor_y >= win_y + win_h - 45 && cursor_y <= win_y + win_h - 20 {
+                    TUTORIAL_STEP += 1;
+                    return true;
+                }
+            }
+            4 => {
+                let prev_x = win_x + 20;
+                let finish_x = win_x + win_w - 90;
+                
+                if cursor_x >= prev_x && cursor_x <= prev_x + 80 &&
+                   cursor_y >= win_y + win_h - 45 && cursor_y <= win_y + win_h - 20 {
+                    TUTORIAL_STEP = 3;
+                    return true;
+                }
+                
+                if cursor_x >= finish_x && cursor_x <= finish_x + 80 &&
+                   cursor_y >= win_y + win_h - 45 && cursor_y <= win_y + win_h - 20 {
+                    TUTORIAL_OPEN = false;
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        
+        false
+    }
+}
+
+fn open_tutorial() -> &'static str {
+    unsafe {
+        TUTORIAL_OPEN = true;
+        TUTORIAL_STEP = 0;
+    }
+    "Opening tutorial window..."
+}
+
+fn switch_to_wm2_theme() -> &'static str {
+    unsafe {
+        USE_WM2_THEME = true;
+        "Theme switched to wm2.rs! New Aero-style interface activated!"
+    }
+}
+
+// ========== СИСТЕМА ЗАПУСКА ПРИЛОЖЕНИЙ ==========
+fn call_app(app_name: &str, args: &str) -> &'static str {
+    unsafe {
+        APP_RESULT = [0; 256];
+        
+        match app_name {
+            "calc" | "calculator" => apps::calculator(args),
+            "echo" => apps::echo(args),
+            "strlen" | "len" => apps::strlen(args),
+            "reverse" | "rev" => apps::reverse(args),
+            "to-upper" | "upper" => apps::to_upper(args),
+            "to-lower" | "lower" => apps::to_lower(args),
+            "greet" => apps::greet(args),
+            "cre-tool" | "cretool" => apps::cre_tool(args),
+            "list-apps" | "apps" => apps::list_apps(),
+            _ => {
+                let msg = "App not found! Use 'list-apps' to see available apps.";
+                let bytes = msg.as_bytes();
+                let len = bytes.len().min(255);
+                APP_RESULT[..len].copy_from_slice(&bytes[..len]);
+                APP_RESULT[len] = 0;
+                core::str::from_utf8(&APP_RESULT[..len]).unwrap_or("")
+            }
+        }
+    }
+}
+
+// ========== ФУНКЦИИ ДЛЯ СИСТЕМЫ ПОЛЬЗОВАТЕЛЕЙ ==========
+
+fn draw_login_window(gfx: &mut Graphics) {
+    let screen_w = gfx.width;
+    let screen_h = gfx.height;
+    
+    unsafe {
+        if let Some(ref bmp) = LOGIN_IMAGE {
+            bmp.draw_as_wallpaper(gfx);
+        } else {
+            let wallpaper = WALLPAPER;
+            gfx.clear(wallpaper.to_u32());
+        }
+    }
+    
+    gfx.fill_rect(0, 0, screen_w, screen_h, Color::rgb(0, 0, 0).to_u32());
+    
+    let login_w = 380;
+    let login_h = 300;
+    let login_x = (screen_w - login_w) / 2;
+    let login_y = (screen_h - login_h) / 2;
+    
+    gfx.fill_rect(login_x, login_y, login_w, login_h, Color::rgb(235, 235, 235).to_u32());
+    gfx.draw_rect_border(login_x, login_y, login_w, login_h, Color::rgb(49, 49, 49).to_u32());
+    gfx.draw_rect_border(login_x + 1, login_y + 1, login_w - 2, login_h - 2, Color::WHITE.to_u32());
+    
+    let title_bar_h = 40;
+    gfx.fill_rect(login_x + 2, login_y + 2, login_w - 4, title_bar_h, Color::rgb(70, 70, 70).to_u32());
+    gfx.draw_text(login_x + 20, login_y + 12, "Login to MiOS", Color::WHITE.to_u32(), Color::rgb(70, 70, 70).to_u32());
+    
+    let fields_y = login_y + 60;
+    
+    gfx.draw_text(login_x + 30, fields_y + 10, "Username:", Color::BLACK.to_u32(), Color::rgb(235, 235, 235).to_u32());
+    gfx.fill_rect(login_x + 30, fields_y + 30, 320, 30, Color::WHITE.to_u32());
+    gfx.draw_rect_border(login_x + 30, fields_y + 30, 320, 30, Color::rgb(150, 150, 150).to_u32());
+    
+    unsafe {
+        let username_str = core::str::from_utf8(&LOGIN_USERNAME_INPUT[..LOGIN_USERNAME_LEN]).unwrap_or("");
+        gfx.draw_text(login_x + 35, fields_y + 37, username_str, Color::BLACK.to_u32(), Color::WHITE.to_u32());
+        if !LOGIN_IS_PASSWORD {
+            gfx.draw_text(login_x + 35 + username_str.len() * 8, fields_y + 37, "|", Color::rgb(41, 41, 41).to_u32(), Color::WHITE.to_u32());
+        }
+    }
+    
+    gfx.draw_text(login_x + 30, fields_y + 80, "Password:", Color::BLACK.to_u32(), Color::rgb(235, 235, 235).to_u32());
+    gfx.fill_rect(login_x + 30, fields_y + 100, 320, 30, Color::WHITE.to_u32());
+    gfx.draw_rect_border(login_x + 30, fields_y + 100, 320, 30, Color::rgb(150, 150, 150).to_u32());
+    
+    unsafe {
+        let pass_len = LOGIN_PASSWORD_LEN;
+        let mut stars = [b'*'; 32];
+        for i in 0..pass_len.min(31) {
+            stars[i] = b'*';
+        }
+        let stars_str = core::str::from_utf8(&stars[..pass_len.min(31)]).unwrap_or("");
+        gfx.draw_text(login_x + 35, fields_y + 107, stars_str, Color::BLACK.to_u32(), Color::WHITE.to_u32());
+        if LOGIN_IS_PASSWORD {
+            let pos = if pass_len < 31 { pass_len } else { 31 };
+            gfx.draw_text(login_x + 35 + pos * 8, fields_y + 107, "|", Color::rgb(71, 71, 71).to_u32(), Color::WHITE.to_u32());
+        }
+    }
+    
+    unsafe {
+        if LOGIN_ERROR_LEN > 0 {
+            let err_str = core::str::from_utf8(&LOGIN_ERROR_MSG[..LOGIN_ERROR_LEN]).unwrap_or("");
+            gfx.draw_text(login_x + 30, fields_y + 150, err_str, Color::rgb(255, 0, 0).to_u32(), Color::rgb(235, 235, 235).to_u32());
+        }
+    }
+    
+    let btn_w = 120;
+    let btn_h = 36;
+    let btn_x = login_x + (login_w - btn_w) / 2;
+    let btn_y = fields_y + 180;
+    
+    wm::draw_raised_rect(gfx, btn_x, btn_y, btn_w, btn_h);
+    gfx.fill_rect(btn_x + 2, btn_y + 2, btn_w - 4, btn_h - 4, Color::rgb(36, 36, 36).to_u32());
+    gfx.draw_text(btn_x + (btn_w - 5 * 8) / 2, btn_y + 10, "Login", Color::WHITE.to_u32(), Color::rgb(0, 120, 215).to_u32());
+    
+    gfx.draw_text(login_x + 30, login_y + login_h - 35, "Users: admin, system, user", 
+                  Color::rgb(100, 100, 100).to_u32(), Color::rgb(235, 235, 235).to_u32());
+}
+
+fn handle_login_input(sc: u8, username_input: &mut [u8; 32], username_len: &mut usize,
+                      password_input: &mut [u8; 32], password_len: &mut usize,
+                      is_password: &mut bool) -> bool {
+    let c = match sc {
+        0x1E => Some('a'), 0x30 => Some('b'), 0x2E => Some('c'),
+        0x20 => Some('d'), 0x12 => Some('e'), 0x21 => Some('f'),
+        0x22 => Some('g'), 0x23 => Some('h'), 0x17 => Some('i'),
+        0x24 => Some('j'), 0x25 => Some('k'), 0x26 => Some('l'),
+        0x32 => Some('m'), 0x31 => Some('n'), 0x18 => Some('o'),
+        0x19 => Some('p'), 0x10 => Some('q'), 0x13 => Some('r'),
+        0x1F => Some('s'), 0x14 => Some('t'), 0x16 => Some('u'),
+        0x2F => Some('v'), 0x11 => Some('w'), 0x2D => Some('x'),
+        0x15 => Some('y'), 0x2C => Some('z'),
+        0x39 => Some(' '),
+        0x1C => Some('\n'),
+        0x0E => Some('\x08'),
+        0x02 => Some('1'), 0x03 => Some('2'), 0x04 => Some('3'),
+        0x05 => Some('4'), 0x06 => Some('5'), 0x07 => Some('6'),
+        0x08 => Some('7'), 0x09 => Some('8'), 0x0A => Some('9'),
+        0x0B => Some('0'),
+        0x33 => Some(','), 0x34 => Some('.'), 0x35 => Some('/'),
+        0x27 => Some(';'), 0x28 => Some('\''), 0x2B => Some('\\'),
+        0x29 => Some('`'), 0x0C => Some('-'), 0x0D => Some('='),
+        0x1A => Some('['), 0x1B => Some(']'),
+        _ => None,
+    };
+    
+    if let Some(ch) = c {
+        if ch == '\x08' {
+            if *is_password {
+                if *password_len > 0 { *password_len -= 1; }
+            } else {
+                if *username_len > 0 { *username_len -= 1; }
+            }
+        } else if ch == '\n' {
+            return true;
+        } else if ch == '\t' {
+            *is_password = !*is_password;
+        } else if (ch as u8) >= 0x20 {
+            if *is_password {
+                if *password_len < 31 {
+                    password_input[*password_len] = ch as u8;
+                    *password_len += 1;
+                }
+            } else {
+                if *username_len < 31 {
+                    username_input[*username_len] = ch as u8;
+                    *username_len += 1;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn user_add(username: &str, password: &str, is_admin: bool) -> &'static str {
+    if users::create_user(username, password, is_admin) {
+        if is_admin {
+            "Admin created successfully!"
+        } else {
+            "User created successfully!"
+        }
+    } else {
+        "Error: User already exists or limit reached!"
+    }
+}
+
+fn user_del(username: &str) -> &'static str {
+    if users::delete_user(username) {
+        "User deleted successfully!"
+    } else {
+        "Error: User not found or is admin!"
+    }
+}
+
+fn user_pass(username: &str, new_password: &str) -> &'static str {
+    if users::change_password(username, new_password) {
+        "Password changed successfully!"
+    } else {
+        "Error: User not found!"
+    }
+}
+
+fn user_whoami() -> &'static str {
+    unsafe {
+        let name = users::get_current_username();
+        let home = users::get_current_user_home();
+        let is_admin = users::is_admin();
+        let role = if is_admin { "Admin" } else { "User" };
+        
+        static mut OUTPUT: [u8; 256] = [0; 256];
+        let mut pos = 0;
+        let lines = [
+            "Name: ",
+            "\nRole: ",
+            "\nHome: ",
+            "\n",
+        ];
+        let values = [name.as_bytes(), role.as_bytes(), home.as_bytes()];
+        
+        for i in 0..3 {
+            for b in lines[i].as_bytes() {
+                if pos < 255 { OUTPUT[pos] = *b; pos += 1; }
+            }
+            for b in values[i] {
+                if pos < 255 { OUTPUT[pos] = *b; pos += 1; }
+            }
+        }
+        OUTPUT[pos] = 0;
+        core::str::from_utf8(&OUTPUT[..pos]).unwrap_or("")
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
+    if magic != 0x36d76289 {
+        loop {}
+    }
+
+    let mb = unsafe { MultibootInfo::parse(info_addr) };
+
+    if let Some(fb) = mb.framebuffer {
+        if fb.addr != 0 && fb.width > 0 && fb.height > 0 {
+            let vesa_info = vesa::VesaInfo {
+                addr: fb.addr as usize,
+                width: fb.width as usize,
+                height: fb.height as usize,
+                pitch: fb.pitch as usize,
+                bpp: fb.bpp,
+            };
+            unsafe { VESA_INFO = Some(vesa_info); }
+
+            let mut gfx = Graphics::new(fb.addr, fb.width, fb.height, fb.pitch);
+            
+            let mut vga = crate::vga::VGA::new();
+            vga.clear();
+            vga.write_string("MiOS booting...\n");
+            vga.write_string("Initializing VESA framebuffer...\n");
+
+            unsafe {
+                BMP_IMAGE = BmpImage::from_bytes(IMG_BMP);
+                BMP_IMAGE2 = BmpImage::from_bytes(IMG2_BMP);
+                BMP_IMAGE3 = BmpImage::from_bytes(IMG3_BMP);
+                ICON_TERMINAL = BmpImage::from_bytes(IC_BMP);
+                ICON_FILES = BmpImage::from_bytes(IC0_BMP);
+                ICON_SETTINGS = BmpImage::from_bytes(IC1_BMP);
+                ICON_ABOUT = BmpImage::from_bytes(IC2_BMP);
+                ICON_NOTEPAD = BmpImage::from_bytes(IC3_BMP);
+                ICON_SNAKE = BmpImage::from_bytes(IC4_BMP);
+                ICON_PAINT = BmpImage::from_bytes(IC5_BMP);
+                ICON_FOLDER = BmpImage::from_bytes(FOLDER_BMP);
+                ICON_FILE = BmpImage::from_bytes(FILE_BMP);
+                ICON_TOOL = BmpImage::from_bytes(TOOL_BMP);
+                ABOUT_IMAGE = BmpImage::from_bytes(ABOUT_BMP);
+                LOGIN_IMAGE = BmpImage::from_bytes(LOGIN_BMP);
+                
+                for y in 0..300 {
+                    for x in 0..400 {
+                        PAINT_CANVAS[y][x] = 0xFFFFFF;
+                        PAINT_CANVAS_BACKUP[y][x] = 0xFFFFFF;
+                    }
+                }
+                PAINT_COLOR = 0x000000;
+                PAINT_PEN_SIZE = 1;
+                PAINT_TOOL = 0;
+                PAINT_IS_DRAWING = false;
+                PAINT_PREV_X = 0;
+                PAINT_PREV_Y = 0;
+                CURRENT_FS_SECTION = 0;
+                DESKTOP_FOLDERS_COUNT = 0;
+                for i in 0..10 {
+                    FOLDER_FILES_COUNT[i] = 0;
+                }
+                SAVED_PAINTINGS_COUNT = 0;
+                
+                users::init_user_system();
+                LOGGED_IN = false;
+                USER_LOGIN_ATTEMPTS = 0;
+                USER_LOGIN_LOCKED = false;
+                LOGIN_USERNAME_LEN = 0;
+                LOGIN_PASSWORD_LEN = 0;
+                LOGIN_IS_PASSWORD = false;
+                LOGIN_ERROR_LEN = 0;
+            }
+
+            vga.write_string("Loading ATA driver...\n");
+            mount_ata_drive(&mut vga);
+            
+            vga.write_string("Initializing Window Manager...\n");
+
+            let mut wm = WindowManager::new();
+
+            let screen_w = gfx.width;
+            let screen_h = gfx.height;
+
+            gfx.clear(Color::BLACK.to_u32());
+
+            let title = "MiOS";
+            let title_width = title.len() * tamzen_font::FONT_WIDTH;
+            let title_x = (screen_w - title_width) / 2;
+            let title_y = screen_h / 2 - 40;
+            gfx.draw_text(title_x, title_y, title, Color::WHITE.to_u32(), Color::BLACK.to_u32());
+
+            let bar_width = 300;
+            let bar_height = 24;
+            let bar_x = (screen_w - bar_width) / 2;
+            let bar_y = screen_h / 2 + 10;
+
+            gfx.draw_rect_border(bar_x - 1, bar_y - 1, bar_width + 2, bar_height + 2, Color::WHITE.to_u32());
+            gfx.flush();
+
+            let total_ticks = 400;
+            for tick in 0..=total_ticks {
+                let progress = (tick as usize * bar_width) / total_ticks as usize;
+                if progress > 0 {
+                    gfx.fill_rect(bar_x, bar_y, progress, bar_height, Color::WHITE.to_u32());
+                    if progress < bar_width {
+                        gfx.fill_rect(bar_x + progress, bar_y, bar_width - progress, bar_height, Color::BLACK.to_u32());
+                    }
+                }
+                gfx.flush();
+                for _ in 0..100000 {
+                    unsafe { core::arch::asm!("nop") }
+                }
+            }
+
+            for _ in 0..50000 {
+                unsafe { core::arch::asm!("nop") }
+            }
+
+            let mut term_input: [u8; 256] = [0; 256];
+            let mut term_len = 0;
+
+            fn push_history(line: &str) {
+                unsafe {
+                    if TERM_HIST_LEN < 20 {
+                        let bytes = line.as_bytes();
+                        let len = if bytes.len() > 80 { 80 } else { bytes.len() };
+                        TERM_HISTORY[TERM_HIST_LEN][..len].copy_from_slice(&bytes[..len]);
+                        TERM_HIST_LEN += 1;
+                    }
+                }
+            }
+            
+            fn clear_history() { 
+                unsafe { 
+                    TERM_HIST_LEN = 0;
+                    for i in 0..20 {
+                        for j in 0..80 {
+                            TERM_HISTORY[i][j] = b' ';
+                        }
+                    }
+                } 
+            }
+            
+            fn exec_command(input: &str) -> &'static str {
+                let trimmed = input.trim();
+                
+                let mut parts = [""; 8];
+                let mut part_count = 0;
+                for word in trimmed.split_whitespace() {
+                    if part_count < 8 {
+                        parts[part_count] = word;
+                        part_count += 1;
+                    }
+                }
+                
+                if part_count >= 2 && parts[0] == "call" {
+                    let app_name = parts[1];
+                    static mut ARGS_BUF: [u8; 256] = [0; 256];
+                    if part_count > 2 {
+                        unsafe {
+                            let mut pos = 0;
+                            for i in 2..part_count {
+                                let word = parts[i].as_bytes();
+                                if pos > 0 {
+                                    ARGS_BUF[pos] = b' ';
+                                    pos += 1;
+                                }
+                                for &b in word {
+                                    if pos < 255 {
+                                        ARGS_BUF[pos] = b;
+                                        pos += 1;
+                                    }
+                                }
+                            }
+                            ARGS_BUF[pos] = 0;
+                            let args_str = core::str::from_utf8(&ARGS_BUF[..pos]).unwrap_or("");
+                            return call_app(app_name, args_str);
+                        }
+                    } else {
+                        return call_app(app_name, "");
+                    }
+                }
+                
+                if trimmed.starts_with("call") && part_count == 1 {
+                    return "Usage: call <app_name> [args...]";
+                }
+                
+                match trimmed {
+                    "help" => "  System:        ver, uptime, mem, about, tech, kernel\n  Users:         login, logout, whoami, users, useradd, userdel, passwd\n  Files:         dir, fs, new folder, ata, tals\n  Terminal:      cls, clear \n  Dev:           devs, developers, mide\n  Fun:           dice\n  Advanced:      stop gui, del ram\n  Other:         tutorial\n  MiDE Settings: mios/grap/wm2.rs\n  Apps:          call <app_name> [args], list-apps\n  Cre Tool:      cre-tool - graphical app builder",
+                    "ver" => "MiOS X",
+                    "mem" => "Memory: error",
+                    "uptime" => "Uptime: 0 ticks",
+                    "dice" => "Dice: 4",
+                    "fs" => "FAT32",
+                    "tutorial" => open_tutorial(),
+                    "mios/grap/wm2.rs" => switch_to_wm2_theme(),
+                    "ata" => {
+                        if unsafe { ATA_MOUNTED } {
+                            "ATA drive is mounted!"
+                        } else {
+                            "No ATA drive detected!"
+                        }
+                    },
+                    "atals" => list_ata_files(),
+                    "devs" => "MiOS Developers: MDEVS",
+                    "developers" => "MiOS Developers: MDEVS",
+                    "kernel" => "MiOS KERNEL:\nFILES KERNEL: lib.rs , wm.rs , mide.rs\nKERNEL BILDER: Mikhail\nKERNEL VER: v5.7\nMade in 2026",
+                    "mide" => "\nmmmmmmmmmmmmmmmmmmmmmmm          MiDE 5\nm MiDE         _ O X  m          MiDE FULL version: 5.3 \nmmmmmmmmmmmmmmmmmmmmmmm          MiOS Version: X (5.9)\nm                     m          Kernel MiDE: ver1.0\nm                     m          made in 2026\nm                     m          MiDE by MDEVS (C)\nmmmmmmmmmmmmmmmmmmmmmmm",
+                    "cls" => "\x04",
+                    "clear" => "\x04",
+                    "about" => "MiOS 6 - Made in 2026 :)",
+                    "tech" => "\nMM       MM     MiOS\nM  M   M  M     Version OS: MiOS 6\nM    M    M     Desktop: MiDE v5.3\nM         M     CPU: X64\nM         M     MiOS By MDEVS",
+                    "dir" => "\nC:/MiOS/\nkernel.bin - lib.rs\nmouse.rs - mouse USB\nvm.rs - MiDE 5.2\nvga.rs - vga mode\nbmp.rs - bmp img system\nfs>\n   fat32.rs\n   mod.rs\n   tar.rs",
+                    "stop gui" => "Access error",
+                    "del ram" => "Access error",
+                    "new folder" => "\x07",
+                    "list-apps" => call_app("list-apps", ""),
+                    "cre-tool" => call_app("cre-tool", ""),
+                    "login" => {
+                        unsafe {
+                            if USER_LOGIN_ATTEMPTS >= 3 {
+                                USER_LOGIN_LOCKED = true;
+                                return "System locked! Too many attempts.";
+                            }
+                            if USER_LOGIN_LOCKED {
+                                return "System locked! Contact admin.";
+                            }
+                            "Use: login <username> <password>"
+                        }
+                    },
+                    "logout" => {
+                        unsafe {
+                            users::logout();
+                            LOGGED_IN = false;
+                            "Logged out successfully!"
+                        }
+                    },
+                    "whoami" => user_whoami(),
+                    "users" => users::list_users(),
+                    "useradd" => {
+                        unsafe {
+                            if !users::is_admin() {
+                                return "Error: Admin rights required!";
+                            }
+                            "Use: useradd <username> <password> [admin]"
+                        }
+                    },
+                    "userdel" => {
+                        unsafe {
+                            if !users::is_admin() {
+                                return "Error: Admin rights required!";
+                            }
+                            "Use: userdel <username>"
+                        }
+                    },
+                    "passwd" => "Use: passwd <username> <new_password>",
+                    "" => "",
+                    _ => {
+                        if part_count >= 2 {
+                            match parts[0] {
+                                "login" => {
+                                    unsafe {
+                                        if USER_LOGIN_LOCKED {
+                                            return "System locked!";
+                                        }
+                                        if part_count >= 3 {
+                                            if users::login(parts[1], parts[2]) {
+                                                LOGGED_IN = true;
+                                                USER_LOGIN_ATTEMPTS = 0;
+                                                return "Welcome!";
+                                            } else {
+                                                USER_LOGIN_ATTEMPTS += 1;
+                                                if USER_LOGIN_ATTEMPTS >= 3 {
+                                                    USER_LOGIN_LOCKED = true;
+                                                    return "System locked! Too many attempts.";
+                                                }
+                                                return "Error: Invalid username or password!";
+                                            }
+                                        } else {
+                                            return "Use: login <username> <password>";
+                                        }
+                                    }
+                                }
+                                "useradd" => {
+                                    unsafe {
+                                        if !users::is_admin() {
+                                            return "Error: Admin rights required!";
+                                        }
+                                        if part_count >= 3 {
+                                            let is_admin = part_count >= 4 && parts[3] == "admin";
+                                            return user_add(parts[1], parts[2], is_admin);
+                                        } else {
+                                            return "Use: useradd <username> <password> [admin]";
+                                        }
+                                    }
+                                }
+                                "userdel" => {
+                                    unsafe {
+                                        if !users::is_admin() {
+                                            return "Error: Admin rights required!";
+                                        }
+                                        if part_count >= 2 {
+                                            return user_del(parts[1]);
+                                        } else {
+                                            return "Use: userdel <username>";
+                                        }
+                                    }
+                                }
+                                "passwd" => {
+                                    if part_count >= 3 {
+                                        return user_pass(parts[1], parts[2]);
+                                    } else {
+                                        return "Use: passwd <username> <new_password>";
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        "Unknown command, error: 00000x5"
+                    }
+                }
+            }
+
+            // ====== ОТРИСОВКА СОДЕРЖИМОГО ОКОН ======
+            fn draw_window_content(gfx: &mut Graphics, win: &wm::Window, idx: usize) {
+                if win.state == WindowState::Minimized {
+                    return;
+                }
+
+                // Проверяем превью
+                let is_preview = unsafe { 
+                    PREVIEW_RUNNING && idx == PREVIEW_WINDOW_INDEX 
+                };
+
+                if is_preview {
+                    let cx = win.x + 2;
+                    let cy = win.y + 26;
+                    gfx.fill_rect(cx, cy, win.width - 4, win.height - 28, Color::WHITE.to_u32());
+                    
+                    unsafe {
+                        for i in 0..PREVIEW_ELEMENTS_COUNT {
+                            let el = &PREVIEW_ELEMENTS[i];
+                            if !el.visible { continue; }
+                            
+                            let el_x = cx + el.x;
+                            let el_y = cy + el.y;
+                            
+                            if el.kind == 1 {
+                                wm::draw_raised_rect(gfx, el_x, el_y, el.w, el.h);
+                                let text = core::str::from_utf8(&el.text[..el.text_len]).unwrap_or("Button");
+                                let text_x = el_x + (el.w - text.len() * 8) / 2;
+                                gfx.draw_text(text_x, el_y + 6, text, Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+                            } else if el.kind == 2 {
+                                let text = core::str::from_utf8(&el.text[..el.text_len]).unwrap_or("Label");
+                                gfx.draw_text(el_x, el_y, text, Color::BLACK.to_u32(), Color::WHITE.to_u32());
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                let t = wm::get_theme();
+                let cx = win.x + 2;
+                let cy = win.y + 26;
+                
+                // Проверяем папки
+                let mut is_folder_window = false;
+                let mut current_folder_index = 0;
+                unsafe {
+                    for i in 0..DESKTOP_FOLDERS_COUNT {
+                        let folder_name = core::str::from_utf8(&DESKTOP_FOLDERS[i]).unwrap_or("");
+                        if folder_name.trim_end_matches('\0') == win.title {
+                            is_folder_window = true;
+                            current_folder_index = i;
+                            break;
+                        }
+                    }
+                }
+                
+                if is_folder_window {
+                    gfx.fill_rect(cx, cy, win.width - 4, win.height - 28, Color::rgb(235, 235, 235).to_u32());
+                    gfx.draw_text(cx + 10, cy + 10, "Folder: ", Color::BLACK.to_u32(), Color::rgb(235, 235, 235).to_u32());
+                    gfx.draw_text(cx + 10 + 8*8, cy + 10, win.title, Color::BLACK.to_u32(), Color::rgb(235, 235, 235).to_u32());
+                    gfx.draw_text(cx + 10, cy + 30, "═══════════════════════", Color::BLACK.to_u32(), Color::rgb(235, 235, 235).to_u32());
+                    
+                    wm::draw_raised_rect(gfx, cx + 10, cy + 40, 150, 24);
+                    gfx.draw_text(cx + 18, cy + 45, "Save Current File", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+                    
+                    unsafe {
+                        let file_count = FOLDER_FILES_COUNT[current_folder_index];
+                        if file_count == 0 {
+                            gfx.draw_text(cx + 10, cy + 80, "No files", Color::rgb(128, 128, 128).to_u32(), Color::rgb(235, 235, 235).to_u32());
+                        } else {
+                            let icon_size = 32;
+                            let start_y = cy + 80;
+                            let mut x_pos = cx + 10;
+                            let mut y_pos = start_y;
+                            let items_per_row = 8;
+                            
+                            for i in 0..file_count {
+                                let filename = core::str::from_utf8(&FOLDER_FILES[current_folder_index][i]).unwrap_or("");
+                                let filename_trimmed = filename.trim_end_matches('\0');
+                                
+                                draw_file_icon(gfx, x_pos, y_pos, filename_trimmed);
+                                
+                                x_pos += icon_size + 10;
+                                if (i + 1) % items_per_row == 0 {
+                                    x_pos = cx + 10;
+                                    y_pos += icon_size + 20;
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // ====== ОТРИСОВКА ПРИЛОЖЕНИЙ ======
+                match win.title {
+                    "Terminal" => {
+                        let history = unsafe { &TERM_HISTORY };
+                        let hist_len = unsafe { TERM_HIST_LEN };
+                        let ubuntu_purple = Color::rgb(0, 0, 0).to_u32();
+                        
+                        gfx.fill_rect(cx, cy, win.width - 4, win.height - 28, ubuntu_purple);
+                        
+                        let max_lines = (win.height - 28 - 20) / 16;
+                        let start_row = if hist_len > max_lines { hist_len - max_lines } else { 0 };
+                        
+                        for row in start_row..hist_len {
+                            let line = core::str::from_utf8(&history[row]).unwrap_or("");
+                            let max_chars = (win.width - 4 - 20) / 8;
+                            let display_line = if line.len() > max_chars { 
+                                &line[..max_chars] 
+                            } else { 
+                                line 
+                            };
+                            gfx.draw_text(cx + 10, cy + 10 + (row - start_row) * 16, display_line, Color::WHITE.to_u32(), ubuntu_purple);
+                        }
+                        let prompt_y = cy + 10 + (hist_len - start_row) * 16;
+                        gfx.draw_text(cx + 10, prompt_y, "MiOS> ", Color::WHITE.to_u32(), ubuntu_purple);
+                    }
+                    "AboutOS" => {
+                        let about_img = unsafe { &ABOUT_IMAGE };
+                        if let Some(ref bmp) = about_img {
+                            let img_x = cx + (win.width - 4 - bmp.width) / 2;
+                            let img_y = cy + 10;
+                            let row_size = ((bmp.width * 3 + 3) / 4) * 4;
+                            for dy in 0..bmp.height {
+                                let bmp_y = (bmp.height - 1).saturating_sub(dy);
+                                let bmp_row_start = bmp_y * row_size;
+                                for dx in 0..bmp.width {
+                                    let pixel_offset = bmp_row_start + dx * 3;
+                                    if pixel_offset + 2 < bmp.data.len() {
+                                        let b = bmp.data[pixel_offset] as u32;
+                                        let g = bmp.data[pixel_offset + 1] as u32;
+                                        let r = bmp.data[pixel_offset + 2] as u32;
+                                        let color = (r << 16) | (g << 8) | b;
+                                        gfx.put_pixel(img_x + dx, img_y + dy, color);
+                                    }
+                                }
+                            }
+                            let info_y = img_y + bmp.height + 20;
+                            gfx.draw_text(cx + 10, info_y, "══════════════════════════════════", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, info_y + 20, "MiOS 6", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, info_y + 40, "Created in 2026", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, info_y + 60, "ENG version", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, info_y + 80, "Creators: MDEVS (c)", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, info_y + 100, "This version is copyrighted", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, info_y + 140, "══════════════════════════════════", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        } else {
+                            gfx.draw_text(cx + 10, cy + 10, "About MiOS", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, cy + 30, "══════════════════════════════════", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, cy + 50, "MiOS 6", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, cy + 70, "Created in 2026", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, cy + 90, "ENG version", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, cy + 110, "Creators: MDEVS (c)", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, cy + 130, "This version is copyrighted", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            gfx.draw_text(cx + 10, cy + 170, "══════════════════════════════════", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        }
+                    }
+                    "Settings" => {
+                        gfx.fill_rect(cx, cy, win.width - 4, win.height - 28, Color::WHITE.to_u32());
+                        gfx.fill_rect(cx, cy, win.width - 4, 30, Color::rgb(236, 233, 216).to_u32());
+                        gfx.fill_rect(cx, cy + 30, win.width - 4, 1, Color::rgb(172, 168, 153).to_u32());
+                        gfx.draw_text(cx + 10, cy + 8, "Settings", Color::BLACK.to_u32(), Color::rgb(236, 233, 216).to_u32());
+
+                        let btn_y1 = cy + 45;
+                        wm::draw_raised_rect(gfx, cx + 10, btn_y1, 200, 28);
+                        gfx.draw_text(cx + 20, btn_y1 + 8, "Change wallpaper", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+
+                        let btn_y2 = cy + 85;
+                        wm::draw_raised_rect(gfx, cx + 10, btn_y2, 200, 28);
+                        gfx.draw_text(cx + 20, btn_y2 + 8, "Change theme", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+
+                        let btn_y3 = cy + 125;
+                        wm::draw_raised_rect(gfx, cx + 10, btn_y3, 200, 28);
+                        let bmp_status = if unsafe { USE_BMP_WALLPAPER } { "BMP Wallpapers: ON" } else { "BMP Wallpapers: OFF" };
+                        gfx.draw_text(cx + 20, btn_y3 + 8, bmp_status, Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+
+                        let btn_y4 = cy + 165;
+                        wm::draw_raised_rect(gfx, cx + 10, btn_y4, 200, 28);
+                        gfx.draw_text(cx + 20, btn_y4 + 8, "Select BMP wallpaper", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+
+                        gfx.draw_text(cx + 10, cy + 250, "Resolution: 800x600", Color::BLACK.to_u32(), Color::WHITE.to_u32());
+                        gfx.draw_text(cx + 10, cy + 270, "MiOS 6", Color::BLACK.to_u32(), Color::WHITE.to_u32());
+
+                        let tidx = unsafe { THEME_IDX };
+                        let name = match tidx { 0 => "Aero", 1 => "Aero Dark", 2 => "Aero Cool", _ => "???" };
+                        gfx.draw_text(cx + 10, cy + 290, "Current Theme: ", Color::BLACK.to_u32(), Color::WHITE.to_u32());
+                        gfx.draw_text(cx + 10 + 14*8, cy + 290, name, Color::BLACK.to_u32(), Color::WHITE.to_u32());
+
+                        let status_y = cy + win.height - 30;
+                        gfx.fill_rect(cx, status_y, win.width - 4, 1, Color::rgb(172, 168, 153).to_u32());
+                        gfx.fill_rect(cx, status_y + 1, win.width - 4, 20, Color::rgb(236, 233, 216).to_u32());
+                        gfx.draw_text(cx + 4, status_y + 5, "System Settings", Color::BLACK.to_u32(), Color::rgb(236, 233, 216).to_u32());
+                    }
+                    "Paint" => {
+                        gfx.fill_rect(cx, cy, win.width - 4, 40, Color::rgb(200, 200, 200).to_u32());
+                        gfx.fill_rect(cx, cy + 40, win.width - 4, 1, Color::rgb(128, 128, 128).to_u32());
+                        
+                        wm::draw_raised_rect(gfx, cx + 5, cy + 5, 30, 30);
+                        gfx.fill_rect(cx + 10, cy + 15, 20, 10, unsafe { PAINT_COLOR });
+                        
+                        wm::draw_raised_rect(gfx, cx + 40, cy + 5, 30, 30);
+                        gfx.fill_rect(cx + 45, cy + 10, 20, 20, unsafe { PAINT_COLOR });
+                        
+                        wm::draw_raised_rect(gfx, cx + 75, cy + 5, 30, 30);
+                        draw_line(gfx, cx + 80, cy + 25, cx + 100, cy + 15, Color::BLACK.to_u32());
+                        
+                        wm::draw_raised_rect(gfx, cx + 110, cy + 5, 30, 30);
+                        gfx.draw_rect_border(cx + 117, cy + 10, 16, 16, Color::BLACK.to_u32());
+                        
+                        let colors = [
+                            0x000000, 0xFF0000, 0x00FF00, 0x0000FF,
+                            0xFFFF00, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
+                        ];
+                        for i in 0..8 {
+                            let color_x = cx + 150 + i * 25;
+                            if color_x + 20 < cx + win.width - 4 - 80 {
+                                wm::draw_raised_rect(gfx, color_x, cy + 5, 20, 30);
+                                gfx.fill_rect(color_x + 3, cy + 8, 14, 24, colors[i]);
+                            }
+                        }
+                        
+                        let sizes = ["1", "3", "5"];
+                        for i in 0..3 {
+                            let size_x = cx + 350 + i * 30;
+                            if size_x + 25 < cx + win.width - 4 - 80 {
+                                wm::draw_raised_rect(gfx, size_x, cy + 5, 25, 30);
+                                gfx.draw_text(size_x + 8, cy + 15, sizes[i], Color::BLACK.to_u32(), Color::rgb(200, 200, 200).to_u32());
+                            }
+                        }
+                        
+                        let save_btn_x = cx + win.width - 4 - 85;
+                        if save_btn_x > cx + 10 {
+                            wm::draw_raised_rect(gfx, save_btn_x, cy + 5, 80, 30);
+                            gfx.draw_text(save_btn_x + 12, cy + 12, "Save Pic", Color::BLACK.to_u32(), Color::rgb(200, 200, 200).to_u32());
+                        }
+                        
+                        let canvas_x = cx + 5;
+                        let canvas_y = cy + 45;
+                        let canvas_w = (win.width - 10).min(400);
+                        let canvas_h = (win.height - 55).min(300);
+                        
+                        gfx.fill_rect(canvas_x, canvas_y, canvas_w, canvas_h, 0xFFFFFF);
+                        gfx.draw_rect_border(canvas_x, canvas_y, canvas_w, canvas_h, Color::BLACK.to_u32());
+                        
+                        unsafe {
+                            for y in 0..canvas_h.min(300) {
+                                for x in 0..canvas_w.min(400) {
+                                    gfx.put_pixel(canvas_x + x, canvas_y + y, PAINT_CANVAS[y][x]);
+                                }
+                            }
+                        }
+                        
+                        let tool_name = unsafe {
+                            match PAINT_TOOL {
+                                0 => "Brush",
+                                1 => "Line",
+                                2 => "Rect",
+                                _ => "Brush",
+                            }
+                        };
+                        let color_val = unsafe { PAINT_COLOR };
+                        let color_r = (color_val >> 16) & 0xFF;
+                        let color_g = (color_val >> 8) & 0xFF;
+                        let color_b = color_val & 0xFF;
+                        
+                        let mut color_str = [0u8; 20];
+                        color_str[0] = b'C';
+                        color_str[1] = b'o';
+                        color_str[2] = b'l';
+                        color_str[3] = b'o';
+                        color_str[4] = b'r';
+                        color_str[5] = b':';
+                        color_str[6] = b' ';
+                        color_str[7] = b'#';
+                        let hex_chars = b"0123456789ABCDEF";
+                        color_str[8] = hex_chars[(color_r >> 4) as usize];
+                        color_str[9] = hex_chars[(color_r & 0xF) as usize];
+                        color_str[10] = hex_chars[(color_g >> 4) as usize];
+                        color_str[11] = hex_chars[(color_g & 0xF) as usize];
+                        color_str[12] = hex_chars[(color_b >> 4) as usize];
+                        color_str[13] = hex_chars[(color_b & 0xF) as usize];
+                        color_str[14] = 0;
+                        
+                        let color_info = core::str::from_utf8(&color_str[..14]).unwrap_or("Color: #------");
+                        gfx.draw_text(cx + 5, cy + win.height - 25, tool_name, Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 100, cy + win.height - 25, color_info, Color::BLACK.to_u32(), t.window_bg.to_u32());
+                    }
+                    "Notepad" => {
+                        gfx.fill_rect(cx, cy, win.width - 4, 28, Color::rgb(236, 233, 216).to_u32());
+                        gfx.fill_rect(cx, cy + 28, win.width - 4, 1, Color::rgb(172, 168, 153).to_u32());
+
+                        wm::draw_raised_rect(gfx, cx + 10, cy + 4, 60, 20);
+                        gfx.draw_text(cx + 20, cy + 7, "Save", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+
+                        wm::draw_raised_rect(gfx, cx + 80, cy + 4, 60, 20);
+                        gfx.draw_text(cx + 90, cy + 7, "Load", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+
+                        let text_y = cy + 32;
+                        gfx.draw_text(cx + 10, text_y + 10, "Notepad", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, text_y + 30, "═══════════════════════", Color::BLACK.to_u32(), t.window_bg.to_u32());
+
+                        let notepad_len = unsafe { NOTEPAD_LEN };
+                        let notepad_text = unsafe { &NOTEPAD_TEXT };
+                        let mut line_y = text_y + 50;
+                        let mut col = 0usize;
+                        for i in 0..notepad_len {
+                            if notepad_text[i] == b'\n' || col >= 40 {
+                                line_y += 16;
+                                col = 0;
+                                if notepad_text[i] == b'\n' { continue; }
+                            }
+                            if line_y < text_y + 300 {
+                                let ch = [notepad_text[i]];
+                                let s = core::str::from_utf8(&ch).unwrap_or(" ");
+                                gfx.draw_text(cx + 10 + col * 8, line_y, s, Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            }
+                            col += 1;
+                        }
+                        if notepad_len > 0 && notepad_text[notepad_len - 1] != b'\n' {
+                            line_y += 16;
+                        }
+                        gfx.draw_text(cx + 10, line_y, "|", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                    }
+                    "Cre Tool" => {
+    gfx.fill_rect(cx, cy, win.width - 4, win.height - 28, Color::rgb(240, 240, 240).to_u32());
+    
+    // Заголовок
+    gfx.draw_text(cx + 10, cy + 10, "Cre Tool - App Builder", Color::rgb(0, 0, 200).to_u32(), Color::rgb(240, 240, 240).to_u32());
+    gfx.draw_text(cx + 10, cy + 30, "═══════════════════════════════", Color::BLACK.to_u32(), Color::rgb(240, 240, 240).to_u32());
+    
+    // ====== КНОПКИ ИНСТРУМЕНТОВ ======
+    let btn_y = cy + 50;
+    let btn_width = 80;
+    let btn_height = 25;
+    
+    // Кнопка "Window"
+    wm::draw_raised_rect(gfx, cx + 10, btn_y, btn_width, btn_height);
+    gfx.draw_text(cx + 18, btn_y + 6, "Window", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+    
+    // Кнопка "Button"
+    wm::draw_raised_rect(gfx, cx + 100, btn_y, btn_width, btn_height);
+    gfx.draw_text(cx + 108, btn_y + 6, "Button", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+    
+    // Кнопка "Label"
+    wm::draw_raised_rect(gfx, cx + 190, btn_y, btn_width, btn_height);
+    gfx.draw_text(cx + 198, btn_y + 6, "Label", Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+    
+    // Кнопка "Run"
+    wm::draw_raised_rect(gfx, cx + 280, btn_y, btn_width, btn_height);
+    gfx.fill_rect(cx + 282, btn_y + 2, btn_width - 4, btn_height - 4, Color::rgb(0, 180, 0).to_u32());
+    gfx.draw_text(cx + 295, btn_y + 6, "Run", Color::WHITE.to_u32(), Color::rgb(0, 180, 0).to_u32());
+    
+    // Кнопка "Clear"
+    wm::draw_raised_rect(gfx, cx + 370, btn_y, btn_width, btn_height);
+    gfx.fill_rect(cx + 372, btn_y + 2, btn_width - 4, btn_height - 4, Color::rgb(180, 0, 0).to_u32());
+    gfx.draw_text(cx + 380, btn_y + 6, "Clear", Color::WHITE.to_u32(), Color::rgb(180, 0, 0).to_u32());
+    
+    // ====== ОБЛАСТЬ ДЛЯ ЭЛЕМЕНТОВ ======
+    let area_y = btn_y + btn_height + 10;
+    let area_h = win.height - 28 - (area_y - cy) - 10;
+    
+    gfx.fill_rect(cx + 5, area_y, win.width - 14, area_h, Color::WHITE.to_u32());
+    gfx.draw_rect_border(cx + 5, area_y, win.width - 14, area_h, Color::rgb(128, 128, 128).to_u32());
+    
+    // ====== ОТРИСОВКА ЭЛЕМЕНТОВ ======
+    unsafe {
+        for i in 0..GUI_ELEMENTS_COUNT {
+            if !GUI_ELEMENTS[i].visible { continue; }
+            let el = &GUI_ELEMENTS[i];
+            let el_x = cx + el.x;
+            let el_y = area_y + el.y;
+            
+            if el.kind == 0 { // Window
+                gfx.fill_rect(el_x, el_y, el.w, el.h, Color::rgb(200, 200, 255).to_u32());
+                gfx.draw_rect_border(el_x, el_y, el.w, el.h, Color::rgb(0, 0, 200).to_u32());
+                let text = core::str::from_utf8(&el.text[..el.text_len]).unwrap_or("Window");
+                gfx.draw_text(el_x + 10, el_y + 10, text, Color::BLACK.to_u32(), Color::rgb(200, 200, 255).to_u32());
+            } else if el.kind == 1 { // Button
+                wm::draw_raised_rect(gfx, el_x, el_y, el.w, el.h);
+                let text = core::str::from_utf8(&el.text[..el.text_len]).unwrap_or("Button");
+                let text_x = el_x + (el.w - text.len() * 8) / 2;
+                gfx.draw_text(text_x, el_y + 6, text, Color::BLACK.to_u32(), Color::rgb(212, 208, 200).to_u32());
+            } else if el.kind == 2 { // Label
+                let text = core::str::from_utf8(&el.text[..el.text_len]).unwrap_or("Label");
+                gfx.draw_text(el_x, el_y, text, Color::rgb(0, 0, 0).to_u32(), Color::WHITE.to_u32());
+            }
+            
+            // ====== ВЫДЕЛЕНИЕ ВЫБРАННОГО ЭЛЕМЕНТА ======
+            if i == SELECTED_ELEMENT {
+                gfx.draw_rect_border(el_x - 2, el_y - 2, el.w + 4, el.h + 4, Color::rgb(255, 0, 0).to_u32());
+                
+                // Синий квадратик для ресайза (правый нижний угол)
+                let handle_size = 8;
+                let handle_x = el_x + el.w - handle_size;
+                let handle_y = el_y + el.h - handle_size;
+                gfx.fill_rect(handle_x, handle_y, handle_size, handle_size, Color::rgb(0, 120, 215).to_u32());
+                gfx.draw_rect_border(handle_x, handle_y, handle_size, handle_size, Color::rgb(0, 0, 0).to_u32());
+            }
+        }
+    }
+    
+    // ====== ИНФОРМАЦИЯ ВНИЗУ ======
+    let info_y = cy + win.height - 28 - 16;
+    gfx.draw_text(cx + 10, info_y, "Elements: ", Color::rgb(100, 100, 100).to_u32(), Color::rgb(240, 240, 240).to_u32());
+    unsafe {
+        let count_str = num_to_str(GUI_ELEMENTS_COUNT);
+        gfx.draw_text(cx + 70, info_y, count_str, Color::rgb(100, 100, 100).to_u32(), Color::rgb(240, 240, 240).to_u32());
+    }
+}
+                    "File Manager" => {
+    let win_width = win.width;
+    let win_height = win.height;
+
+    // Фон и заголовок
+    gfx.fill_rect(cx, cy, win_width - 4, win_height - 28, Color::WHITE.to_u32());
+    gfx.fill_rect(cx, cy, win_width - 4, 30, Color::rgb(236, 233, 216).to_u32());
+    gfx.draw_text(cx + 10, cy + 8, "File Manager", Color::BLACK.to_u32(), Color::rgb(236, 233, 216).to_u32());
+
+    // Левая панель
+    let left_panel_w = 120;
+    gfx.fill_rect(cx, cy + 30, left_panel_w, win_height - 58, Color::rgb(240, 240, 240).to_u32());
+    gfx.fill_rect(cx + left_panel_w, cy + 30, 1, win_height - 58, Color::rgb(172, 168, 153).to_u32());
+    
+    let current_section = unsafe { CURRENT_FS_SECTION };
+    
+    // Секции в левой панели
+    let sections = [
+        (cy + 45, 0, "System"),
+        (cy + 80, 1, "Documents"),
+        (cy + 115, 2, "SATA Drive"),
+    ];
+    
+    for (s_y, s_idx, name) in sections.iter() {
+        if current_section == *s_idx {
+            wm::draw_sunken_rect(gfx, cx + 5, *s_y, left_panel_w - 10, 28);
+            gfx.fill_rect(cx + 6, s_y + 1, left_panel_w - 12, 26, Color::rgb(200, 220, 240).to_u32());
+        } else {
+            wm::draw_raised_rect(gfx, cx + 5, *s_y, left_panel_w - 10, 28);
+        }
+        gfx.draw_text(cx + 15, s_y + 7, name, Color::BLACK.to_u32(), 
+                      if current_section == *s_idx { Color::rgb(200, 220, 240).to_u32() } else { Color::rgb(240, 240, 240).to_u32() });
+    }
+    
+    // ====== ПРАВАЯ ПАНЕЛЬ - СПИСОК ФАЙЛОВ ======
+    let content_x = cx + left_panel_w + 15;
+    let content_y = cy + 40;
+    
+    unsafe {
+        // Показываем путь
+        let path = match CURRENT_FS_SECTION {
+            0 => "C:/MiOS/",
+            1 => "C:/Documents/",
+            2 => "SATA Drive:/",
+            _ => "C:/",
+        };
+        gfx.draw_text(content_x, content_y, path, Color::rgb(0, 0, 200).to_u32(), Color::WHITE.to_u32());
+        gfx.fill_rect(cx + left_panel_w + 5, content_y + 20, win_width - left_panel_w - 20, 1, Color::rgb(200, 200, 200).to_u32());
+        
+        let start_y = content_y + 30;
+        
+        if CURRENT_FS_SECTION == 0 {
+            // СИСТЕМНЫЕ ФАЙЛЫ
+            let files = [
+                "kernel.bin",
+                "lib.rs",
+                "wm.rs",
+                "apps.rs",
+                "vga.rs",
+                "ata.rs",
+                "fs.rs",
+                "mouse.rs",
+                "users.rs",
+                "bmp.rs",
+                "graphics.rs",
+                "gui.rs",
+            ];
+            
+            for (i, filename) in files.iter().enumerate() {
+                let file_y = start_y + i * 22;
+                if file_y + 20 < win_height - 30 {
+                    gfx.draw_text(content_x + 5, file_y, "📄", Color::rgb(100, 100, 100).to_u32(), Color::WHITE.to_u32());
+                    gfx.draw_text(content_x + 25, file_y, filename, Color::rgb(60, 60, 60).to_u32(), Color::WHITE.to_u32());
+                    gfx.draw_text(content_x + 150, file_y, "4.2 KB", Color::rgb(150, 150, 150).to_u32(), Color::WHITE.to_u32());
+                }
+            }
+            
+        } else if CURRENT_FS_SECTION == 1 {
+            // ДОКУМЕНТЫ
+            let doc_count = SAVED_DOCUMENTS_COUNT;
+            if doc_count == 0 {
+                gfx.draw_text(content_x + 5, start_y + 10, "No documents", Color::rgb(128, 128, 128).to_u32(), Color::WHITE.to_u32());
+                gfx.draw_text(content_x + 5, start_y + 35, "Create and save from Notepad", Color::rgb(128, 128, 128).to_u32(), Color::WHITE.to_u32());
+            } else {
+                for i in 0..doc_count {
+                    let file_y = start_y + i * 22;
+                    if file_y + 20 < win_height - 30 {
+                        let label = ["Doc 1", "Doc 2", "Doc 3", "Doc 4", "Doc 5"];
+                        gfx.draw_text(content_x + 5, file_y, "📄", Color::rgb(100, 100, 100).to_u32(), Color::WHITE.to_u32());
+                        gfx.draw_text(content_x + 25, file_y, label[i], Color::rgb(0, 0, 180).to_u32(), Color::WHITE.to_u32());
+                        
+                        let preview_len = if SAVED_DOCUMENTS_LEN[i] > 20 { 20 } else { SAVED_DOCUMENTS_LEN[i] };
+                        let preview = core::str::from_utf8(&SAVED_DOCUMENTS[i][..preview_len]).unwrap_or("");
+                        if SAVED_DOCUMENTS_LEN[i] > 0 {
+                            gfx.draw_text(content_x + 130, file_y, preview, Color::rgb(100, 100, 100).to_u32(), Color::WHITE.to_u32());
+                        }
+                    }
+                }
+            }
+            
+        } else if CURRENT_FS_SECTION == 2 {
+            // SATA DRIVE
+            if ATA_DIR_COUNT == 0 {
+                gfx.draw_text(content_x + 5, start_y + 10, "No files on SATA drive", Color::rgb(128, 128, 128).to_u32(), Color::WHITE.to_u32());
+                gfx.draw_text(content_x + 5, start_y + 35, "Connect SATA drive to see files", Color::rgb(128, 128, 128).to_u32(), Color::WHITE.to_u32());
+            } else {
+                for i in 0..ATA_DIR_COUNT {
+                    let file_y = start_y + i * 22;
+                    if file_y + 20 < win_height - 30 {
+                        let filename = str::from_utf8(&ATA_DIR_ENTRIES[i]).unwrap_or("");
+                        let filename_trimmed = filename.trim_end_matches('\0');
+                        gfx.draw_text(content_x + 5, file_y, "💾", Color::rgb(100, 100, 100).to_u32(), Color::WHITE.to_u32());
+                        gfx.draw_text(content_x + 25, file_y, filename_trimmed, Color::rgb(0, 0, 180).to_u32(), Color::WHITE.to_u32());
+                        gfx.draw_text(content_x + 150, file_y, "4.2 KB", Color::rgb(150, 150, 150).to_u32(), Color::WHITE.to_u32());
+                    }
+                }
+            }
+        }
+    }
+    
+    // ====== СТАТУС БАР ВНИЗУ (БЕЗ format!) ======
+    let status_y = cy + win_height - 26;
+    gfx.fill_rect(cx, status_y, win_width - 4, 24, Color::rgb(236, 233, 216).to_u32());
+    gfx.fill_rect(cx, status_y, win_width - 4, 1, Color::rgb(172, 168, 153).to_u32());
+    
+    unsafe {
+        let count = if CURRENT_FS_SECTION == 0 { 12 } 
+                    else if CURRENT_FS_SECTION == 1 { SAVED_DOCUMENTS_COUNT } 
+                    else if CURRENT_FS_SECTION == 2 { ATA_DIR_COUNT } 
+                    else { 0 };
+        
+        // Конвертируем число в строку вручную
+        let mut num_str = [0u8; 10];
+        let mut temp = count;
+        let mut i = 0;
+        if temp == 0 {
+            num_str[0] = b'0';
+            i = 1;
+        } else {
+            let mut digits = [0u8; 10];
+            let mut j = 0;
+            while temp > 0 {
+                digits[j] = b'0' + (temp % 10) as u8;
+                temp /= 10;
+                j += 1;
+            }
+            while j > 0 {
+                j -= 1;
+                num_str[i] = digits[j];
+                i += 1;
+            }
+        }
+        
+        // Формируем строку "X items"
+        let mut status_text = [0u8; 32];
+        let mut pos = 0;
+        for &b in b"Items: " {
+            status_text[pos] = b;
+            pos += 1;
+        }
+        for j in 0..i {
+            status_text[pos] = num_str[j];
+            pos += 1;
+        }
+        status_text[pos] = 0;
+        
+        let status_str = core::str::from_utf8(&status_text[..pos]).unwrap_or("0 items");
+        gfx.draw_text(cx + 8, status_y + 5, status_str, Color::BLACK.to_u32(), Color::rgb(236, 233, 216).to_u32());
+    }
+}
+                    "About Files" => {
+                        gfx.draw_text(cx + 10, cy + 10, "About Files", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 30, "═══════════════════════", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 50, "File Manager Application", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 70, "Created by Mikhail", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 90, "Year: 2026", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 110, "═══════════════════════", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 130, "MiOS X (5.9)", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                    }
+                    "Wallpaper Selector" => {
+                        gfx.draw_text(cx + 10, cy + 10, "Select Wallpaper Color:", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        let colors = [
+                            ("Sky Blue", Color::rgb(89, 0, 255)),
+                            ("Dark Teal", Color::rgb(0, 23, 128)),
+                            ("Red", Color::rgb(192, 0, 0)),
+                            ("Yellow", Color::rgb(192, 192, 0)),
+                            ("Dark Blue", Color::rgb(0, 0, 128)),
+                            ("Purple", Color::rgb(128, 0, 128)),
+                        ];
+                        for (i, (name, color)) in colors.iter().enumerate() {
+                            let y_pos = cy + 30 + i * 30;
+                            wm::draw_raised_rect(gfx, cx + 10, y_pos, 250, 24);
+                            gfx.fill_rect(cx + 15, y_pos + 4, 16, 16, color.to_u32());
+                            gfx.draw_text(cx + 40, y_pos + 6, name, Color::BLACK.to_u32(), t.button_face.to_u32());
+                        }
+                    }
+                    "BMP Wallpaper Selector" => {
+                        gfx.draw_text(cx + 10, cy + 10, "Select BMP Wallpaper:", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        
+                        let wallpapers = [
+                            ("Wallpaper 1", 0),
+                            ("Wallpaper 2", 1),
+                            ("Wallpaper 3", 2),
+                        ];
+                        
+                        for (i, (name, idx)) in wallpapers.iter().enumerate() {
+                            let y_pos = cy + 30 + i * 60;
+                            wm::draw_raised_rect(gfx, cx + 10, y_pos, 250, 50);
+                            
+                            let preview_bmp = match idx {
+                                0 => unsafe { &BMP_IMAGE },
+                                1 => unsafe { &BMP_IMAGE2 },
+                                2 => unsafe { &BMP_IMAGE3 },
+                                _ => unsafe { &BMP_IMAGE },
+                            };
+                            
+                            if let Some(ref bmp) = preview_bmp {
+                                let row_size = ((bmp.width * 3 + 3) / 4) * 4;
+                                for dy in 0..40.min(bmp.height) {
+                                    let bmp_y = (bmp.height - 1).saturating_sub(dy);
+                                    let bmp_row_start = bmp_y * row_size;
+                                    for dx in 0..40.min(bmp.width) {
+                                        let pixel_offset = bmp_row_start + dx * 3;
+                                        if pixel_offset + 2 < bmp.data.len() {
+                                            let b = bmp.data[pixel_offset] as u32;
+                                            let g = bmp.data[pixel_offset + 1] as u32;
+                                            let r = bmp.data[pixel_offset + 2] as u32;
+                                            let color = (r << 16) | (g << 8) | b;
+                                            gfx.put_pixel(cx + 15 + dx, y_pos + 5 + dy, color);
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            gfx.draw_text(cx + 65, y_pos + 20, name, Color::BLACK.to_u32(), t.button_face.to_u32());
+                        }
+                    }
+                    "Theme Selector" => {
+                        gfx.draw_text(cx + 10, cy + 10, "Select Window Theme:", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        let themes = [("Aero", 0usize), ("Aero Dark", 1), ("Aero Cool (Light)", 2)];
+                        for (i, (name, _)) in themes.iter().enumerate() {
+                            let y_pos = cy + 30 + i * 30;
+                            wm::draw_raised_rect(gfx, cx + 10, y_pos, 250, 24);
+                            gfx.draw_text(cx + 20, y_pos + 6, name, Color::BLACK.to_u32(), t.button_face.to_u32());
+                        }
+                    }
+                    "Manage Documents" => {
+                        let mode = unsafe { DOCUMENT_MANAGER_MODE };
+                        let mode_text = if mode == 0 { "Save Document" } else { "Load Document" };
+                        gfx.draw_text(cx + 10, cy + 10, mode_text, Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 30, "═══════════════════════", Color::BLACK.to_u32(), t.window_bg.to_u32());
+
+                        let count = unsafe { SAVED_DOCUMENTS_COUNT };
+                        if count == 0 {
+                            gfx.draw_text(cx + 10, cy + 50, "No documents saved yet", Color::rgb(128, 128, 128).to_u32(), t.window_bg.to_u32());
+                        } else {
+                            for i in 0..count {
+                                let y_pos = cy + 50 + i * 30;
+                                wm::draw_raised_rect(gfx, cx + 10, y_pos, 250, 24);
+                                let label = ["Document 1", "Document 2", "Document 3", "Document 4", "Document 5"];
+                                gfx.draw_text(cx + 20, y_pos + 6, label[i], Color::BLACK.to_u32(), t.button_face.to_u32());
+                                let doc = unsafe { &SAVED_DOCUMENTS[i] };
+                                let doc_len = unsafe { SAVED_DOCUMENTS_LEN[i] };
+                                let preview_len = if doc_len < 20 { doc_len } else { 20 };
+                                let preview = core::str::from_utf8(&doc[..preview_len]).unwrap_or("");
+                                gfx.draw_text(cx + 120, y_pos + 6, preview, Color::rgb(100, 100, 100).to_u32(), t.button_face.to_u32());
+                            }
+                        }
+
+                        if mode == 0 && count < 5 {
+                            let new_y = cy + 50 + count * 30;
+                            wm::draw_raised_rect(gfx, cx + 10, new_y, 250, 24);
+                            gfx.draw_text(cx + 20, new_y + 6, "Save as new document...", Color::BLACK.to_u32(), t.button_face.to_u32());
+                        }
+
+                        let close_y = cy + 200;
+                        wm::draw_raised_rect(gfx, cx + 10, close_y, 100, 24);
+                        gfx.draw_text(cx + 20, close_y + 6, "Close", Color::BLACK.to_u32(), t.button_face.to_u32());
+                    }
+                    _ => {
+                        gfx.draw_text(cx + 10, cy + 10, win.title, Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 30, "File System: FAT32", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 46, "All system files:", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 62, "Kernel.bin , MiDE.bin , kursor.bin", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 78, "mouse.rs , boot.cfg , config(GRUB)", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 88, "shell.rs , gui , vesa.rs", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                        gfx.draw_text(cx + 10, cy + 97, "boot.cfg , termenal.rs , pakeg.zip", Color::BLACK.to_u32(), t.window_bg.to_u32());
+                    }
+                }
+            }
+
+            fn redraw_all(gfx: &mut Graphics, wm: &WindowManager, term_input: &[u8], term_len: usize) {
+                let use_bmp = unsafe { USE_BMP_WALLPAPER };
+                let current_idx = unsafe { CURRENT_BMP_INDEX };
+                
+                if use_bmp {
+                    let bmp_to_use = match current_idx {
+                        0 => unsafe { &BMP_IMAGE },
+                        1 => unsafe { &BMP_IMAGE2 },
+                        2 => unsafe { &BMP_IMAGE3 },
+                        _ => unsafe { &BMP_IMAGE },
+                    };
+                    
+                    if let Some(ref bmp) = bmp_to_use {
+                        bmp.draw_as_wallpaper(gfx);
+                    } else {
+                        let wallpaper = unsafe { WALLPAPER };
+                        gfx.clear(wallpaper.to_u32());
+                    }
+                } else {
+                    let wallpaper = unsafe { WALLPAPER };
+                    gfx.clear(wallpaper.to_u32());
+                }
+
+                let t = wm::get_theme();
+                let taskbar_h = 30;
+                let taskbar_y = gfx.height - taskbar_h;
+
+                gfx.fill_rect(0, taskbar_y, gfx.width, taskbar_h, t.taskbar_bg.to_u32());
+                wm::draw_raised_rect(gfx, 2, taskbar_y + 2, 50, 26);
+                gfx.draw_text(6, taskbar_y + 8, "Start", t.button_text.to_u32(), t.button_face.to_u32());
+
+                let mut btn_x = 58;
+                for i in 0..wm.window_count {
+                    if let Some(title) = wm.get_window_title(i) {
+                        let btn_w = 100;
+                        if btn_x + btn_w < gfx.width - 100 {
+                            let is_active = wm.active_window == Some(i) &&
+                                wm.windows[i].as_ref().map(|w| w.state != WindowState::Minimized).unwrap_or(false);
+                            if is_active {
+                                wm::draw_sunken_rect(gfx, btn_x, taskbar_y + 3, btn_w, 24);
+                            } else {
+                                wm::draw_raised_rect(gfx, btn_x, taskbar_y + 3, btn_w, 24);
+                            }
+                            gfx.draw_text(btn_x + 6, taskbar_y + 9, title, t.button_text.to_u32(), t.button_face.to_u32());
+                            btn_x += btn_w + 4;
+                        }
+                    }
+                }
+
+                let icon_size = 64;
+                let icon_y = 50;
+                let icon_bg_color = if use_bmp { Color::rgb(0, 0, 0) } else { unsafe { WALLPAPER } };
+
+                let icons_data: [(usize, &str, &Option<BmpImage>); 7] = [
+                    (50, "Terminal", unsafe { &ICON_TERMINAL }),
+                    (150, "Files", unsafe { &ICON_FILES }),
+                    (250, "Settings", unsafe { &ICON_SETTINGS }),
+                    (350, "AboutOS", unsafe { &ICON_ABOUT }),
+                    (450, "Notepad", unsafe { &ICON_NOTEPAD }),
+                    (550, "Paint", unsafe { &ICON_PAINT }),
+                    (650, "Cre Tool", unsafe { &ICON_TOOL }),
+                ];
+
+                for (x, lbl, icon) in icons_data.iter() {
+                    wm::draw_raised_rect(gfx, *x, icon_y, icon_size, icon_size);
+                    draw_icon(gfx, *x + 4, icon_y + 4, icon, icon_size - 8);
+                    gfx.draw_text(*x + (icon_size - lbl.len() * 8) / 2, icon_y + icon_size + 5, lbl, t.desktop_icon_text.to_u32(), icon_bg_color.to_u32());
+                }
+                
+                unsafe {
+                    let mut row = 0;
+                    let folders_per_row = 6;
+                    
+                    for i in 0..DESKTOP_FOLDERS_COUNT {
+                        let folder_name = core::str::from_utf8(&DESKTOP_FOLDERS[i]).unwrap_or("");
+                        let folder_name_trimmed = folder_name.trim_end_matches('\0');
+                        
+                        if folder_name_trimmed.len() > 0 {
+                            let current_x = 50 + (i % folders_per_row) * 100;
+                            let current_y = icon_y + icon_size + 40 + (row * (icon_size + 30));
+                            
+                            if current_y + icon_size < taskbar_y {
+                                draw_folder_icon(gfx, current_x, current_y, folder_name_trimmed);
+                            }
+                            
+                            if (i + 1) % folders_per_row == 0 {
+                                row += 1;
+                            }
+                        }
+                    }
+                }
+
+                wm.start_menu.draw(gfx);
+
+                wm.draw_all_with_content(gfx, &|gfx, win, idx| {
+                    draw_window_content(gfx, win, idx);
+                });
+
+                if let Some(active) = wm.active_window {
+                    if let Some(ref win) = wm.windows[active] {
+                        if win.title == "Terminal" && win.state != WindowState::Minimized {
+                            let cx = win.x + 2;
+                            let cy = win.y + 26;
+                            let hist_len = unsafe { TERM_HIST_LEN };
+                            let prompt_y = cy + 10 + hist_len * 16;
+                            if term_len > 0 {
+                                let text = core::str::from_utf8(&term_input[..term_len]).unwrap_or("");
+                                gfx.draw_text(cx + 10 + 6*8, prompt_y, text, Color::BLACK.to_u32(), t.window_bg.to_u32());
+                            }
+                        }
+                    }
+                }
+                
+                unsafe {
+                    if CONTEXT_MENU_OPEN {
+                        draw_context_menu(gfx, CONTEXT_MENU_X, CONTEXT_MENU_Y);
+                    }
+                    if NAME_INPUT_OPEN {
+                        draw_name_input_dialog(gfx);
+                    }
+                    if TUTORIAL_OPEN {
+                        draw_tutorial_window(gfx);
+                    }
+                }
+            }
+
+            draw_login_window(&mut gfx);
+            gfx.flush();
+
+            unsafe { idt::init_idt(); }
+            mouse::init_ps2_mouse();
+            unsafe { mouse::init_mouse_interrupts(); }
+
+            let mut cursor_x = 400usize;
+            let mut cursor_y = 300usize;
+            let cursor_size = 23;
+            let mut cursor_backup = [[0u32; 23]; 23];
+            let mut left_prev = false;
+            let mut right_prev = false;
+
+            let cursor_shape: [[u32; 23]; 23] = [
+                [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,2,2,2,2,2,2,2,1,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,2,2,2,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0],
+                [1,2,2,2,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,2,1,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,2,1,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                [1,1,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,1,2,2,2,1,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0],
+            ];
+
+            loop {
+                let mut need_flush = false;
+
+                if let Some(sc) = mouse::get_key() {
+                    unsafe {
+                        if !LOGGED_IN {
+                            if sc & 0x80 == 0 {
+                                let enter_pressed = handle_login_input(
+                                    sc,
+                                    &mut LOGIN_USERNAME_INPUT,
+                                    &mut LOGIN_USERNAME_LEN,
+                                    &mut LOGIN_PASSWORD_INPUT,
+                                    &mut LOGIN_PASSWORD_LEN,
+                                    &mut LOGIN_IS_PASSWORD
+                                );
+                                
+                                if enter_pressed {
+                                    let username = core::str::from_utf8(&LOGIN_USERNAME_INPUT[..LOGIN_USERNAME_LEN]).unwrap_or("");
+                                    let password = core::str::from_utf8(&LOGIN_PASSWORD_INPUT[..LOGIN_PASSWORD_LEN]).unwrap_or("");
+                                    
+                                    if users::login(username, password) {
+                                        LOGGED_IN = true;
+                                        LOGIN_ERROR_LEN = 0;
+                                        LOGIN_USERNAME_LEN = 0;
+                                        LOGIN_PASSWORD_LEN = 0;
+                                        USER_LOGIN_ATTEMPTS = 0;
+                                        redraw_all(&mut gfx, &wm, &term_input, term_len);
+                                        need_flush = true;
+                                    } else {
+                                        USER_LOGIN_ATTEMPTS += 1;
+                                        if USER_LOGIN_ATTEMPTS >= 3 {
+                                            USER_LOGIN_LOCKED = true;
+                                            let msg = b"System locked!";
+                                            LOGIN_ERROR_LEN = msg.len();
+                                            LOGIN_ERROR_MSG[..msg.len()].copy_from_slice(msg);
+                                        } else {
+                                            let msg = b"Error!";
+                                            LOGIN_ERROR_LEN = msg.len();
+                                            LOGIN_ERROR_MSG[..msg.len()].copy_from_slice(msg);
+                                        }
+                                        draw_login_window(&mut gfx);
+                                        need_flush = true;
+                                    }
+                                }
+                                draw_login_window(&mut gfx);
+                                need_flush = true;
+                            }
+                        } else {
+                            if sc & 0x80 == 0 {
+                                if NAME_INPUT_OPEN {
+                                    let c = match sc {
+                                        0x1E => Some('a'), 0x30 => Some('b'), 0x2E => Some('c'),
+                                        0x20 => Some('d'), 0x12 => Some('e'), 0x21 => Some('f'),
+                                        0x22 => Some('g'), 0x23 => Some('h'), 0x17 => Some('i'),
+                                        0x24 => Some('j'), 0x25 => Some('k'), 0x26 => Some('l'),
+                                        0x32 => Some('m'), 0x31 => Some('n'), 0x18 => Some('o'),
+                                        0x19 => Some('p'), 0x10 => Some('q'), 0x13 => Some('r'),
+                                        0x1F => Some('s'), 0x14 => Some('t'), 0x16 => Some('u'),
+                                        0x2F => Some('v'), 0x11 => Some('w'), 0x2D => Some('x'),
+                                        0x15 => Some('y'), 0x2C => Some('z'),
+                                        0x39 => Some(' '),
+                                        0x1C => Some('\n'),
+                                        0x0E => Some('\x08'),
+                                        0x02 => Some('1'), 0x03 => Some('2'), 0x04 => Some('3'),
+                                        0x05 => Some('4'), 0x06 => Some('5'), 0x07 => Some('6'),
+                                        0x08 => Some('7'), 0x09 => Some('8'), 0x0A => Some('9'),
+                                        0x0B => Some('0'),
+                                        0x33 => Some(','), 0x34 => Some('.'), 0x35 => Some('/'),
+                                        0x27 => Some(';'), 0x28 => Some('\''), 0x2B => Some('\\'),
+                                        0x29 => Some('`'), 0x0C => Some('-'), 0x0D => Some('='),
+                                        0x1A => Some('['), 0x1B => Some(']'),
+                                        _ => None,
+                                    };
+                                    if let Some(ch) = c {
+                                        if ch == '\x08' && NAME_INPUT_LEN > 0 {
+                                            NAME_INPUT_LEN -= 1;
+                                        } else if ch == '\n' {
+                                            if let Some(callback) = NAME_INPUT_CALLBACK {
+                                                let name_str = core::str::from_utf8(&NAME_INPUT_BUFFER[..NAME_INPUT_LEN]).unwrap_or("");
+                                                if name_str.len() > 0 {
+                                                    callback(name_str);
+                                                }
+                                            }
+                                            NAME_INPUT_OPEN = false;
+                                        } else if (ch as u8) >= 0x20 && NAME_INPUT_LEN < 63 {
+                                            NAME_INPUT_BUFFER[NAME_INPUT_LEN] = ch as u8;
+                                            NAME_INPUT_LEN += 1;
+                                        }
+                                        redraw_all(&mut gfx, &wm, &term_input, term_len);
+                                        need_flush = true;
+                                    }
+                                } else if let Some(active) = wm.active_window {
+                                    if let Some(ref win) = wm.windows[active] {
+                                        let is_term = win.title == "Terminal" && win.state != WindowState::Minimized;
+                                        let is_notepad = win.title == "Notepad" && win.state != WindowState::Minimized;
+                                        let is_cretool = win.title == "Cre Tool" && win.state != WindowState::Minimized;
+
+                                        if is_term {
+                                            let c = match sc {
+                                                0x1E => Some('a'), 0x30 => Some('b'), 0x2E => Some('c'),
+                                                0x20 => Some('d'), 0x12 => Some('e'), 0x21 => Some('f'),
+                                                0x22 => Some('g'), 0x23 => Some('h'), 0x17 => Some('i'),
+                                                0x24 => Some('j'), 0x25 => Some('k'), 0x26 => Some('l'),
+                                                0x32 => Some('m'), 0x31 => Some('n'), 0x18 => Some('o'),
+                                                0x19 => Some('p'), 0x10 => Some('q'), 0x13 => Some('r'),
+                                                0x1F => Some('s'), 0x14 => Some('t'), 0x16 => Some('u'),
+                                                0x2F => Some('v'), 0x11 => Some('w'), 0x2D => Some('x'),
+                                                0x15 => Some('y'), 0x2C => Some('z'),
+                                                0x39 => Some(' '),
+                                                0x1C => Some('\n'),
+                                                0x0E => Some('\x08'),
+                                                0x02 => Some('1'), 0x03 => Some('2'), 0x04 => Some('3'),
+                                                0x05 => Some('4'), 0x06 => Some('5'), 0x07 => Some('6'),
+                                                0x08 => Some('7'), 0x09 => Some('8'), 0x0A => Some('9'),
+                                                0x0B => Some('0'),
+                                                0x33 => Some(','), 0x34 => Some('.'), 0x35 => Some('/'),
+                                                0x27 => Some(';'), 0x28 => Some('\''), 0x2B => Some('\\'),
+                                                0x29 => Some('`'), 0x0C => Some('-'), 0x0D => Some('='),
+                                                0x1A => Some('['), 0x1B => Some(']'),
+                                                _ => None,
+                                            };
+                                            if let Some(ch) = c {
+                                                if ch == '\n' {
+                                                    let cmd = core::str::from_utf8(&term_input[..term_len]).unwrap_or("");
+                                                    let out = exec_command(cmd);
+                                                    if out == "\x04" {
+                                                        clear_history();
+                                                        push_history("MiOS> cls");
+                                                    } else if out == "\x05" {
+                                                        show_blue_screen_of_death(&mut gfx);
+                                                    } else if out == "\x06" {
+                                                        show_blue_screen_stop_gui(&mut gfx);
+                                                    } else if out == "\x07" {
+                                                        create_folder_on_desktop("Folder");
+                                                        push_history("MiOS> new folder");
+                                                        push_history("Folder created on desktop");
+                                                    } else {
+                                                        push_history("MiOS> ");
+                                                        if !cmd.is_empty() {
+                                                            push_history(cmd);
+                                                            if !out.is_empty() {
+                                                                for line in out.split('\n') {
+                                                                    push_history(line);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    term_len = 0;
+                                                } else if ch == '\x08' && term_len > 0 {
+                                                    term_len -= 1;
+                                                } else if (ch as u8) >= 0x20 && term_len < 255 {
+                                                    term_input[term_len] = ch as u8;
+                                                    term_len += 1;
+                                                }
+                                                redraw_all(&mut gfx, &wm, &term_input, term_len);
+                                                need_flush = true;
+                                            }
+                                        } else if is_notepad {
+                                            let c = match sc {
+                                                0x1E => Some('a'), 0x30 => Some('b'), 0x2E => Some('c'),
+                                                0x20 => Some('d'), 0x12 => Some('e'), 0x21 => Some('f'),
+                                                0x22 => Some('g'), 0x23 => Some('h'), 0x17 => Some('i'),
+                                                0x24 => Some('j'), 0x25 => Some('k'), 0x26 => Some('l'),
+                                                0x32 => Some('m'), 0x31 => Some('n'), 0x18 => Some('o'),
+                                                0x19 => Some('p'), 0x10 => Some('q'), 0x13 => Some('r'),
+                                                0x1F => Some('s'), 0x14 => Some('t'), 0x16 => Some('u'),
+                                                0x2F => Some('v'), 0x11 => Some('w'), 0x2D => Some('x'),
+                                                0x15 => Some('y'), 0x2C => Some('z'),
+                                                0x39 => Some(' '),
+                                                0x1C => Some('\n'),
+                                                0x0E => Some('\x08'),
+                                                0x02 => Some('1'), 0x03 => Some('2'), 0x04 => Some('3'),
+                                                0x05 => Some('4'), 0x06 => Some('5'), 0x07 => Some('6'),
+                                                0x08 => Some('7'), 0x09 => Some('8'), 0x0A => Some('9'),
+                                                0x0B => Some('0'),
+                                                0x33 => Some(','), 0x34 => Some('.'), 0x35 => Some('/'),
+                                                0x27 => Some(';'), 0x28 => Some('\''), 0x2B => Some('\\'),
+                                                0x29 => Some('`'), 0x0C => Some('-'), 0x0D => Some('='),
+                                                0x1A => Some('['), 0x1B => Some(']'),
+                                                _ => None,
+                                            };
+                                            if let Some(ch) = c {
+                                                if ch == '\x08' && NOTEPAD_LEN > 0 {
+                                                    NOTEPAD_LEN -= 1;
+                                                } else if ch == '\n' && NOTEPAD_LEN < 1023 {
+                                                    NOTEPAD_TEXT[NOTEPAD_LEN] = b'\n';
+                                                    NOTEPAD_LEN += 1;
+                                                } else if (ch as u8) >= 0x20 && NOTEPAD_LEN < 1023 {
+                                                    NOTEPAD_TEXT[NOTEPAD_LEN] = ch as u8;
+                                                    NOTEPAD_LEN += 1;
+                                                }
+                                                redraw_all(&mut gfx, &wm, &term_input, term_len);
+                                                need_flush = true;
+                                            }
+                                        } else if is_cretool {
+                                            if sc == 0x53 && (sc & 0x80 == 0) {
+                                                unsafe {
+                                                    if SELECTED_ELEMENT < GUI_ELEMENTS_COUNT {
+                                                        for i in SELECTED_ELEMENT..GUI_ELEMENTS_COUNT - 1 {
+                                                            GUI_ELEMENTS[i] = GUI_ELEMENTS[i + 1];
+                                                        }
+                                                        GUI_ELEMENTS_COUNT -= 1;
+                                                        if SELECTED_ELEMENT >= GUI_ELEMENTS_COUNT {
+                                                            SELECTED_ELEMENT = GUI_ELEMENTS_COUNT - 1;
+                                                        }
+                                                        redraw_all(&mut gfx, &wm, &term_input, term_len);
+                                                        need_flush = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(packet) = mouse::get_mouse_packet() {
+                    let old_x = cursor_x;
+                    let old_y = cursor_y;
+                    cursor_x = (cursor_x as i32 + packet.dx).max(0).min((gfx.width - cursor_size) as i32) as usize;
+                    cursor_y = (cursor_y as i32 + packet.dy).max(0).min((gfx.height - cursor_size) as i32) as usize;
+
+                    for dy in 0..cursor_size {
+                        for dx in 0..cursor_size {
+                            if old_x + dx < gfx.width && old_y + dy < gfx.height {
+                                gfx.put_pixel(old_x + dx, old_y + dy, cursor_backup[dy][dx]);
+                            }
+                        }
+                    }
+
+                    let mut redraw = false;
+                    let mut paint_update = false;
+
+                    unsafe {
+                        if !LOGGED_IN {
+                            if packet.left && !left_prev {
+                                let screen_w = gfx.width;
+                                let screen_h = gfx.height;
+                                let login_w = 380;
+                                let login_h = 300;
+                                let login_x = (screen_w - login_w) / 2;
+                                let login_y = (screen_h - login_h) / 2;
+                                let btn_w = 120;
+                                let btn_h = 36;
+                                let btn_x = login_x + (login_w - btn_w) / 2;
+                                let btn_y = login_y + 240;
+
+                                if cursor_x >= btn_x && cursor_x <= btn_x + btn_w &&
+                                   cursor_y >= btn_y && cursor_y <= btn_y + btn_h {
+                                    let username = core::str::from_utf8(&LOGIN_USERNAME_INPUT[..LOGIN_USERNAME_LEN]).unwrap_or("");
+                                    let password = core::str::from_utf8(&LOGIN_PASSWORD_INPUT[..LOGIN_PASSWORD_LEN]).unwrap_or("");
+                                    
+                                    if users::login(username, password) {
+                                        LOGGED_IN = true;
+                                        LOGIN_ERROR_LEN = 0;
+                                        LOGIN_USERNAME_LEN = 0;
+                                        LOGIN_PASSWORD_LEN = 0;
+                                        USER_LOGIN_ATTEMPTS = 0;
+                                        redraw_all(&mut gfx, &wm, &term_input, term_len);
+                                        redraw = true;
+                                    } else {
+                                        USER_LOGIN_ATTEMPTS += 1;
+                                        if USER_LOGIN_ATTEMPTS >= 3 {
+                                            USER_LOGIN_LOCKED = true;
+                                            let msg = b"System locked!";
+                                            LOGIN_ERROR_LEN = msg.len();
+                                            LOGIN_ERROR_MSG[..msg.len()].copy_from_slice(msg);
+                                        } else {
+                                            let msg = b"Error!";
+                                            LOGIN_ERROR_LEN = msg.len();
+                                            LOGIN_ERROR_MSG[..msg.len()].copy_from_slice(msg);
+                                        }
+                                        draw_login_window(&mut gfx);
+                                        redraw = true;
+                                    }
+                                }
+                                
+                                let fields_y = login_y + 60;
+                                if cursor_x >= login_x + 30 && cursor_x <= login_x + 350 {
+                                    if cursor_y >= fields_y + 30 && cursor_y <= fields_y + 60 {
+                                        LOGIN_IS_PASSWORD = false;
+                                        draw_login_window(&mut gfx);
+                                        redraw = true;
+                                    } else if cursor_y >= fields_y + 100 && cursor_y <= fields_y + 130 {
+                                        LOGIN_IS_PASSWORD = true;
+                                        draw_login_window(&mut gfx);
+                                        redraw = true;
+                                    }
+                                }
+                            }
+                        } else {
+                            if TUTORIAL_OPEN {
+                                if packet.left && !left_prev {
+                                    if handle_tutorial_click(cursor_x, cursor_y) {
+                                        redraw = true;
+                                    }
+                                }
+                            }
+                            
+                            // ====== ОБРАБОТКА CRE TOOL ======
+if let Some(active) = wm.active_window {
+    if let Some(ref win) = wm.windows[active] {
+        if win.title == "Cre Tool" && win.state != WindowState::Minimized {
+            let wx = win.x + 2;
+            let wy = win.y + 26;
+            
+            let btn_y = wy + 50;
+            let btn_height = 25;
+            
+            // Кнопка Window
+            if cursor_x >= wx + 10 && cursor_x <= wx + 90 &&
+               cursor_y >= btn_y && cursor_y <= btn_y + btn_height {
+                if GUI_ELEMENTS_COUNT < 16 {
+                    let mut el = apps::GuiElement {
+                        x: 50, y: 50, w: 200, h: 150,
+                        kind: 0,
+                        text: [0; 64],
+                        text_len: 0,
+                        visible: true,
+                    };
+                    let text = "Window";
+                    let bytes = text.as_bytes();
+                    let len = bytes.len().min(63);
+                    el.text[..len].copy_from_slice(bytes);
+                    el.text_len = len;
+                    GUI_ELEMENTS[GUI_ELEMENTS_COUNT] = el;
+                    SELECTED_ELEMENT = GUI_ELEMENTS_COUNT;
+                    GUI_ELEMENTS_COUNT += 1;
+                    redraw = true;
+                }
+            }
+            
+            // Кнопка Button
+            if cursor_x >= wx + 100 && cursor_x <= wx + 180 &&
+               cursor_y >= btn_y && cursor_y <= btn_y + btn_height {
+                if GUI_ELEMENTS_COUNT < 16 {
+                    let mut el = apps::GuiElement {
+                        x: 30, y: 100, w: 80, h: 25,
+                        kind: 1,
+                        text: [0; 64],
+                        text_len: 0,
+                        visible: true,
+                    };
+                    let text = "Button";
+                    let bytes = text.as_bytes();
+                    let len = bytes.len().min(63);
+                    el.text[..len].copy_from_slice(bytes);
+                    el.text_len = len;
+                    GUI_ELEMENTS[GUI_ELEMENTS_COUNT] = el;
+                    SELECTED_ELEMENT = GUI_ELEMENTS_COUNT;
+                    GUI_ELEMENTS_COUNT += 1;
+                    redraw = true;
+                }
+            }
+            
+            // Кнопка Label
+            if cursor_x >= wx + 190 && cursor_x <= wx + 270 &&
+               cursor_y >= btn_y && cursor_y <= btn_y + btn_height {
+                if GUI_ELEMENTS_COUNT < 16 {
+                    let mut el = apps::GuiElement {
+                        x: 30, y: 60, w: 100, h: 20,
+                        kind: 2,
+                        text: [0; 64],
+                        text_len: 0,
+                        visible: true,
+                    };
+                    let text = "Label";
+                    let bytes = text.as_bytes();
+                    let len = bytes.len().min(63);
+                    el.text[..len].copy_from_slice(bytes);
+                    el.text_len = len;
+                    GUI_ELEMENTS[GUI_ELEMENTS_COUNT] = el;
+                    SELECTED_ELEMENT = GUI_ELEMENTS_COUNT;
+                    GUI_ELEMENTS_COUNT += 1;
+                    redraw = true;
+                }
+            }
+            
+            // Кнопка Run
+            if cursor_x >= wx + 280 && cursor_x <= wx + 360 &&
+               cursor_y >= btn_y && cursor_y <= btn_y + btn_height {
+                let mut win_title = "My App";
+                let mut has_window = false;
+                
+                for i in 0..GUI_ELEMENTS_COUNT {
+                    if GUI_ELEMENTS[i].kind == 0 && GUI_ELEMENTS[i].visible {
+                        win_title = core::str::from_utf8(&GUI_ELEMENTS[i].text[..GUI_ELEMENTS[i].text_len]).unwrap_or("My App");
+                        has_window = true;
+                        break;
+                    }
+                }
+                
+                if !has_window {
+                    push_history("Error: Add a Window element first!");
+                } else {
+                    let win_idx = wm.create_window(win_title, 150, 100, 450, 350);
+                    
+                    for i in 0..GUI_ELEMENTS_COUNT {
+                        PREVIEW_ELEMENTS[i] = GUI_ELEMENTS[i];
+                    }
+                    PREVIEW_ELEMENTS_COUNT = GUI_ELEMENTS_COUNT;
+                    PREVIEW_WINDOW_INDEX = win_idx;
+                    PREVIEW_RUNNING = true;
+                    
+                    push_history("App running! Press Delete to close.");
+                    redraw = true;
+                }
+            }
+            
+            // Кнопка Clear
+            if cursor_x >= wx + 370 && cursor_x <= wx + 450 &&
+               cursor_y >= btn_y && cursor_y <= btn_y + btn_height {
+                for i in 0..16 {
+                    GUI_ELEMENTS[i].visible = false;
+                }
+                GUI_ELEMENTS_COUNT = 0;
+                SELECTED_ELEMENT = 0;
+                redraw = true;
+                push_history("All elements cleared!");
+            }
+            
+            // ====== ВЫБОР, ПЕРЕТАСКИВАНИЕ И РЕСАЙЗ ЭЛЕМЕНТОВ ======
+            let area_y = btn_y + btn_height + 10;
+            if cursor_y >= area_y {
+                let area_x = cursor_x - wx;
+                let area_y_local = cursor_y - area_y;
+                let mut found = false;
+                
+                for i in (0..GUI_ELEMENTS_COUNT).rev() {
+                    if !GUI_ELEMENTS[i].visible { continue; }
+                    let el = &GUI_ELEMENTS[i];
+                    
+                    if area_x >= el.x && area_x <= el.x + el.w &&
+                       area_y_local >= el.y && area_y_local <= el.y + el.h {
+                        
+                        // Проверяем клик по уголку для ресайза
+                        let handle_size = 10;
+                        if area_x >= el.x + el.w - handle_size && 
+                           area_x <= el.x + el.w &&
+                           area_y_local >= el.y + el.h - handle_size && 
+                           area_y_local <= el.y + el.h {
+                            RESIZE_ACTIVE = true;
+                            RESIZE_ELEMENT_INDEX = i;
+                            found = true;
+                            DRAG_ACTIVE = false;
+                            redraw = true;
+                            break;
+                        }
+                        
+                        SELECTED_ELEMENT = i;
+                        DRAG_ACTIVE = true;
+                        DRAG_ELEMENT_INDEX = i;
+                        DRAG_OFFSET_X = area_x - el.x;
+                        DRAG_OFFSET_Y = area_y_local - el.y;
+                        RESIZE_ACTIVE = false;
+                        found = true;
+                        redraw = true;
+                        break;
+                    }
+                }
+                
+                if !found {
+                    SELECTED_ELEMENT = 0;
+                    redraw = true;
+                }
+            }
+        }
+    }
+}
+
+                            // Paint обработка
+                            if let Some(active) = wm.active_window {
+                                if let Some(ref win) = wm.windows[active] {
+                                    if win.title == "Paint" && win.state != WindowState::Minimized {
+                                        let wx = win.x + 2;
+                                        let wy = win.y + 26;
+                                        let canvas_x = wx + 5;
+                                        let canvas_y = wy + 45;
+                                        let canvas_w = (win.width - 10).min(400);
+                                        let canvas_h = (win.height - 55).min(300);
+                                        
+                                        if cursor_x >= canvas_x && cursor_x < canvas_x + canvas_w &&
+                                           cursor_y >= canvas_y && cursor_y < canvas_y + canvas_h {
+                                            
+                                            let canvas_cx = cursor_x - canvas_x;
+                                            let canvas_cy = cursor_y - canvas_y;
+                                            
+                                            if packet.left {
+                                                let size = PAINT_PEN_SIZE;
+                                                let color = PAINT_COLOR;
+                                                let tool = PAINT_TOOL;
+                                                
+                                                match tool {
+                                                    0 => {
+                                                        for dy in 0..size {
+                                                            for dx in 0..size {
+                                                                let x = canvas_cx + dx - size/2;
+                                                                let y = canvas_cy + dy - size/2;
+                                                                if x < canvas_w && y < canvas_h && x < 400 && y < 300 && x >= 0 && y >= 0 {
+                                                                    PAINT_CANVAS[y][x] = color;
+                                                                }
+                                                            }
+                                                        }
+                                                        paint_update = true;
+                                                    }
+                                                    1 => {
+                                                        if PAINT_IS_DRAWING {
+                                                            draw_line_on_canvas(PAINT_PREV_X, PAINT_PREV_Y, canvas_cx, canvas_cy, color);
+                                                        }
+                                                        PAINT_PREV_X = canvas_cx;
+                                                        PAINT_PREV_Y = canvas_cy;
+                                                        PAINT_IS_DRAWING = true;
+                                                        paint_update = true;
+                                                    }
+                                                    2 => {
+                                                        if PAINT_IS_DRAWING {
+                                                            for y in 0..300 {
+                                                                for x in 0..400 {
+                                                                    PAINT_CANVAS[y][x] = PAINT_CANVAS_BACKUP[y][x];
+                                                                }
+                                                            }
+                                                            draw_rect_on_canvas(PAINT_RECT_START_X, PAINT_RECT_START_Y, canvas_cx, canvas_cy, color);
+                                                        } else {
+                                                            for y in 0..300 {
+                                                                for x in 0..400 {
+                                                                    PAINT_CANVAS_BACKUP[y][x] = PAINT_CANVAS[y][x];
+                                                                }
+                                                            }
+                                                            PAINT_RECT_START_X = canvas_cx;
+                                                            PAINT_RECT_START_Y = canvas_cy;
+                                                            PAINT_IS_DRAWING = true;
+                                                        }
+                                                        paint_update = true;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            } else {
+                                                if PAINT_IS_DRAWING && PAINT_TOOL == 2 {
+                                                    for y in 0..300 {
+                                                        for x in 0..400 {
+                                                            PAINT_CANVAS_BACKUP[y][x] = PAINT_CANVAS[y][x];
+                                                        }
+                                                    }
+                                                    PAINT_IS_DRAWING = false;
+                                                }
+                                                if PAINT_TOOL == 1 {
+                                                    PAINT_IS_DRAWING = false;
+                                                }
+                                            }
+                                        } else {
+                                            if PAINT_IS_DRAWING && PAINT_TOOL == 2 {
+                                                for y in 0..300 {
+                                                    for x in 0..400 {
+                                                        PAINT_CANVAS[y][x] = PAINT_CANVAS_BACKUP[y][x];
+                                                    }
+                                                }
+                                                PAINT_IS_DRAWING = false;
+                                                paint_update = true;
+                                            }
+                                            if PAINT_TOOL == 1 {
+                                                PAINT_IS_DRAWING = false;
+                                            }
+                                        }
+                                        
+                                        if packet.left && !left_prev {
+                                            if cursor_x >= wx + 40 && cursor_x <= wx + 70 &&
+                                               cursor_y >= wy + 5 && cursor_y <= wy + 35 {
+                                                PAINT_TOOL = 0;
+                                                redraw = true;
+                                            }
+                                            if cursor_x >= wx + 75 && cursor_x <= wx + 105 &&
+                                               cursor_y >= wy + 5 && cursor_y <= wy + 35 {
+                                                PAINT_TOOL = 1;
+                                                PAINT_IS_DRAWING = false;
+                                                redraw = true;
+                                            }
+                                            if cursor_x >= wx + 110 && cursor_x <= wx + 140 &&
+                                               cursor_y >= wy + 5 && cursor_y <= wy + 35 {
+                                                PAINT_TOOL = 2;
+                                                PAINT_IS_DRAWING = false;
+                                                for y in 0..300 {
+                                                    for x in 0..400 {
+                                                        PAINT_CANVAS_BACKUP[y][x] = PAINT_CANVAS[y][x];
+                                                    }
+                                                }
+                                                redraw = true;
+                                            }
+                                            for i in 0..8 {
+                                                let color_x = wx + 150 + i * 25;
+                                                if cursor_x >= color_x && cursor_x <= color_x + 20 &&
+                                                   cursor_y >= wy + 5 && cursor_y <= wy + 35 {
+                                                    let colors = [0x000000, 0xFF0000, 0x00FF00, 0x0000FF,
+                                                                  0xFFFF00, 0xFF00FF, 0x00FFFF, 0xFFFFFF];
+                                                    PAINT_COLOR = colors[i];
+                                                    redraw = true;
+                                                }
+                                            }
+                                            for i in 0..3 {
+                                                let size_x = wx + 350 + i * 30;
+                                                if cursor_x >= size_x && cursor_x <= size_x + 25 &&
+                                                   cursor_y >= wy + 5 && cursor_y <= wy + 35 {
+                                                    PAINT_PEN_SIZE = i * 2 + 1;
+                                                    redraw = true;
+                                                }
+                                            }
+                                            let save_btn_x = wx + win.width - 4 - 85;
+                                            if cursor_x >= save_btn_x && cursor_x <= save_btn_x + 80 &&
+                                               cursor_y >= wy + 5 && cursor_y <= wy + 35 {
+                                                if SAVED_PAINTINGS_COUNT < 5 {
+                                                    for y in 0..300 {
+                                                        for x in 0..400 {
+                                                            SAVED_PAINTINGS[SAVED_PAINTINGS_COUNT][y][x] = PAINT_CANVAS[y][x];
+                                                        }
+                                                    }
+                                                    SAVED_PAINTINGS_COUNT += 1;
+                                                    redraw = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if paint_update {
+                                redraw = true;
+                            }
+                            
+                            if packet.right && !right_prev && !TUTORIAL_OPEN {
+                                if CONTEXT_MENU_OPEN {
+                                    CONTEXT_MENU_OPEN = false;
+                                    redraw = true;
+                                } else {
+                                    let mut clicked_on_window = false;
+                                    for i in 0..wm.window_count {
+                                        if let Some(ref win) = wm.windows[i] {
+                                            if win.contains(cursor_x, cursor_y) && win.state != WindowState::Minimized {
+                                                clicked_on_window = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let taskbar_y = gfx.height - 30;
+                                    if !clicked_on_window && !(cursor_y >= taskbar_y) {
+                                        CONTEXT_MENU_X = cursor_x;
+                                        CONTEXT_MENU_Y = cursor_y;
+                                        CONTEXT_MENU_OPEN = true;
+                                        redraw = true;
+                                    }
+                                }
+                            }
+                            
+                            if packet.left && !left_prev && !TUTORIAL_OPEN {
+                                if CONTEXT_MENU_OPEN {
+                                    let menu_x = CONTEXT_MENU_X;
+                                    let menu_y = CONTEXT_MENU_Y;
+                                    let menu_w = 160;
+                                    let menu_h = 112;
+                                    
+                                    if cursor_x >= menu_x && cursor_x <= menu_x + menu_w &&
+                                       cursor_y >= menu_y && cursor_y <= menu_y + menu_h {
+                                        let item_index = (cursor_y - menu_y - 4) / 24;
+                                        match item_index {
+                                            0 => {
+                                                wm.create_window("Terminal", 100, 100, 500, 350);
+                                                term_len = 0;
+                                                clear_history();
+                                                redraw = true;
+                                            }
+                                            1 => {
+                                                wm.create_window("AboutOS", 200, 100, 400, 350);
+                                                redraw = true;
+                                            }
+                                            2 => {
+                                                wm.create_window("Settings", 200, 180, 450, 370);
+                                                redraw = true;
+                                            }
+                                            3 => {
+                                                show_name_input_dialog(&mut gfx, create_folder_on_desktop, 0, 0);
+                                                redraw = true;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    CONTEXT_MENU_OPEN = false;
+                                    redraw = true;
+                                }
+                                
+                                let name_input_handled = handle_name_input_click(cursor_x, cursor_y);
+                                if name_input_handled {
+                                    redraw = true;
+                                }
+                                
+                                let taskbar_y = gfx.height - 30;
+                                if cursor_y >= taskbar_y + 3 && cursor_y < taskbar_y + 27 {
+                                    let mut bx = 58;
+                                    for i in 0..wm.window_count {
+                                        if let Some(_) = wm.get_window_title(i) {
+                                            let bw = 100;
+                                            if cursor_x >= bx && cursor_x < bx + bw {
+                                                if let Some(ref win) = wm.windows[i] {
+                                                    if win.state == WindowState::Minimized {
+                                                        wm.restore_window(i);
+                                                    } else {
+                                                        wm.active_window = Some(i);
+                                                    }
+                                                    redraw = true;
+                                                }
+                                                break;
+                                            }
+                                            bx += bw + 4;
+                                        }
+                                    }
+                                }
+
+                                if !redraw && !name_input_handled {
+
+                                     // ====== ОБРАБОТКА КЛИКОВ В FILE MANAGER ======
+    if let Some(active) = wm.active_window {
+        if let Some(ref win) = wm.windows[active] {
+            if win.title == "File Manager" && win.state != WindowState::Minimized {
+                let wx = win.x + 2;
+                let wy = win.y + 26;
+                let left_panel_w = 120;
+                
+                let sections = [
+                    (wy + 45, 0),
+                    (wy + 80, 1),
+                    (wy + 115, 2),
+                ];
+                
+                for (s_y, s_idx) in sections.iter() {
+                    if cursor_x >= wx + 5 && cursor_x <= wx + left_panel_w - 5 &&
+                       cursor_y >= *s_y && cursor_y <= *s_y + 28 {
+                        CURRENT_FS_SECTION = *s_idx;
+                        redraw = true;
+                    }
+                }
+                
+                let content_x = wx + left_panel_w + 15;
+                let content_y = wy + 40;
+                let start_y = content_y + 30;
+                
+                unsafe {
+                    if CURRENT_FS_SECTION == 1 {
+                        for i in 0..SAVED_DOCUMENTS_COUNT {
+                            let file_y = start_y + i * 22;
+                            if cursor_x >= content_x && cursor_x <= content_x + 200 &&
+                               cursor_y >= file_y && cursor_y <= file_y + 20 {
+                                let doc_len = SAVED_DOCUMENTS_LEN[i];
+                                let copy_len = if doc_len > 1024 { 1024 } else { doc_len };
+                                NOTEPAD_TEXT[..copy_len].copy_from_slice(&SAVED_DOCUMENTS[i][..copy_len]);
+                                NOTEPAD_LEN = copy_len;
+                                wm.create_window("Notepad", 100, 100, 500, 400);
+                                redraw = true;
+                                break;
+                            }
+                        }
+                    } else if CURRENT_FS_SECTION == 2 {
+                        for i in 0..ATA_DIR_COUNT {
+                            let file_y = start_y + i * 22;
+                            if cursor_x >= content_x && cursor_x <= content_x + 200 &&
+                               cursor_y >= file_y && cursor_y <= file_y + 20 {
+                                let filename = str::from_utf8(&ATA_DIR_ENTRIES[i]).unwrap_or("");
+                                let filename_trimmed = filename.trim_end_matches('\0');
+                                open_ata_file_in_notepad(&mut wm, filename_trimmed);
+                                redraw = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ====== ОБРАБОТКА КЛИКОВ В NOTEPAD ======
+if let Some(active) = wm.active_window {
+    if let Some(ref win) = wm.windows[active] {
+        if win.title == "Notepad" && win.state != WindowState::Minimized {
+            let wx = win.x + 2;
+            let wy = win.y + 26;
+            
+            // Кнопка Save
+            if cursor_x >= wx + 10 && cursor_x <= wx + 70 &&
+               cursor_y >= wy + 4 && cursor_y <= wy + 24 {
+                // Сохраняем в Documents
+                unsafe {
+                    if SAVED_DOCUMENTS_COUNT < 5 {
+                        let text_len = NOTEPAD_LEN;
+                        let copy_len = if text_len > 512 { 512 } else { text_len };
+                        let idx = SAVED_DOCUMENTS_COUNT;
+                        SAVED_DOCUMENTS[idx][..copy_len].copy_from_slice(&NOTEPAD_TEXT[..copy_len]);
+                        SAVED_DOCUMENTS_LEN[idx] = copy_len;
+                        SAVED_DOCUMENTS_COUNT += 1;
+                        push_history("Document saved!");
+                        redraw = true;
+                    } else {
+                        push_history("Error: Max 5 documents!");
+                    }
+                }
+            }
+            
+            // Кнопка Load
+            if cursor_x >= wx + 80 && cursor_x <= wx + 140 &&
+               cursor_y >= wy + 4 && cursor_y <= wy + 24 {
+                // Открываем окно выбора документов
+                DOCUMENT_MANAGER_MODE = 1;
+                DOCUMENT_MANAGER_OPEN = true;
+                wm.create_window("Manage Documents", 200, 150, 300, 280);
+                push_history("Select document to load");
+                redraw = true;
+            }
+        }
+    }
+}
+
+                                    let icon_y = 50;
+                                    let icon_size = 64;
+                                    let taskbar_y = gfx.height - 30;
+                                    let mut folder_clicked = false;
+                                    
+                                    unsafe {
+                                        let mut row = 0;
+                                        let folders_per_row = 6;
+                                        
+                                        for i in 0..DESKTOP_FOLDERS_COUNT {
+                                            let folder_name = core::str::from_utf8(&DESKTOP_FOLDERS[i]).unwrap_or("");
+                                            let folder_name_trimmed = folder_name.trim_end_matches('\0');
+                                            
+                                            if folder_name_trimmed.len() > 0 {
+                                                let current_x = 50 + (i % folders_per_row) * 100;
+                                                let current_y = icon_y + icon_size + 40 + (row * (icon_size + 30));
+                                                
+                                                if current_y + icon_size < taskbar_y {
+                                                    if cursor_x >= current_x && cursor_x <= current_x + icon_size &&
+                                                       cursor_y >= current_y && cursor_y <= current_y + icon_size + 20 {
+                                                        open_folder_window(&mut wm, folder_name_trimmed, i);
+                                                        folder_clicked = true;
+                                                        redraw = true;
+                                                        break;
+                                                    }
+                                                }
+                                                
+                                                if (i + 1) % folders_per_row == 0 {
+                                                    row += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    if !folder_clicked {
+                                        let mut tool_clicked = false;
+                                        if cursor_x >= 650 && cursor_x <= 714 && cursor_y >= 50 && cursor_y <= 114 {
+                                            wm.create_window("Cre Tool", 100, 100, 480, 400);
+                                            tool_clicked = true;
+                                            redraw = true;
+                                            push_history("Cre Tool opened!");
+                                            push_history("Use buttons to add UI elements");
+                                        }
+                                        
+                                        if !tool_clicked {
+                                            let mut folder_window_click = false;
+                                            for i in 0..wm.window_count {
+                                                if let Some(ref win) = wm.windows[i] {
+                                                    let mut is_folder = false;
+                                                    let mut current_folder_idx = 0;
+                                                    unsafe {
+                                                        for j in 0..DESKTOP_FOLDERS_COUNT {
+                                                            let folder_name = core::str::from_utf8(&DESKTOP_FOLDERS[j]).unwrap_or("");
+                                                            if folder_name.trim_end_matches('\0') == win.title {
+                                                                is_folder = true;
+                                                                current_folder_idx = j;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    if is_folder && win.state != WindowState::Minimized {
+                                                        let wx = win.x + 2;
+                                                        let wy = win.y + 26;
+                                                        
+                                                        if cursor_x >= wx + 10 && cursor_x <= wx + 160 &&
+                                                           cursor_y >= wy + 40 && cursor_y <= wy + 64 {
+                                                            show_name_input_dialog(&mut gfx, save_file_to_folder, 1, current_folder_idx);
+                                                            folder_window_click = true;
+                                                            redraw = true;
+                                                            break;
+                                                        }
+                                                        
+                                                        unsafe {
+                                                            let file_count = FOLDER_FILES_COUNT[current_folder_idx];
+                                                            let icon_sz = 32;
+                                                            let start_y = wy + 80;
+                                                            let mut x_pos = wx + 10;
+                                                            let mut y_pos = start_y;
+                                                            let items_per_row = 8;
+                                                            
+                                                            for j in 0..file_count {
+                                                                if cursor_x >= x_pos && cursor_x <= x_pos + icon_sz &&
+                                                                   cursor_y >= y_pos && cursor_y <= y_pos + icon_sz + 20 {
+                                                                    open_file_from_folder(&mut wm, current_folder_idx, j);
+                                                                    folder_window_click = true;
+                                                                    redraw = true;
+                                                                    break;
+                                                                }
+                                                                
+                                                                x_pos += icon_sz + 10;
+                                                                if (j + 1) % items_per_row == 0 {
+                                                                    x_pos = wx + 10;
+                                                                    y_pos += icon_sz + 20;
+                                                                }
+                                                            }
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            
+                                            if !folder_window_click {
+                                                if wm.start_menu.open {
+                                                    if let Some(action) = wm.start_menu.handle_click(&gfx, cursor_x, cursor_y) {
+                                                        match action {
+                                                            "Terminal" => { wm.create_window("Terminal", 100, 100, 500, 350); term_len = 0; clear_history(); }
+                                                            "Files" => { wm.create_window("File Manager", 150, 120, 500, 350); }
+                                                            "Settings" => { wm.create_window("Settings", 200, 180, 450, 370); }
+                                                            "Notepad" => { wm.create_window("Notepad", 100, 100, 500, 400); }
+                                                            "Paint" => { wm.create_window("Paint", 100, 100, 420, 400); }
+                                                            "Cre Tool" => { wm.create_window("Cre Tool", 100, 100, 480, 400); }
+                                                            "Reboot" => {
+                                                                WALLPAPER = Color::rgb(89, 0, 255);
+                                                                THEME_IDX = 0;
+                                                                TERM_HIST_LEN = 0;
+                                                                NOTEPAD_LEN = 0;
+                                                                WALLPAPER_SELECTOR_OPEN = false;
+                                                                THEME_SELECTOR_OPEN = false;
+                                                                DOCUMENT_MANAGER_OPEN = false;
+                                                                DOCUMENT_MANAGER_MODE = 0;
+                                                                SAVED_DOCUMENTS_COUNT = 0;
+                                                                for i in 0..5 { SAVED_DOCUMENTS_LEN[i] = 0; }
+                                                                SAVED_PAINTINGS_COUNT = 0;
+                                                                GRADIENT_TOP_ACTIVE = Color::rgb(90, 90, 90);
+                                                                GRADIENT_BOTTOM_ACTIVE = Color::rgb(20, 20, 20);
+                                                                GRADIENT_TOP_INACTIVE = Color::rgb(105, 105, 105);
+                                                                GRADIENT_BOTTOM_INACTIVE = Color::rgb(50, 50, 50);
+                                                                USE_BMP_WALLPAPER = true;
+                                                                CURRENT_BMP_INDEX = 0;
+                                                                LOGGED_IN = false;
+                                                                DESKTOP_FOLDERS_COUNT = 0;
+                                                                for i in 0..10 {
+                                                                    FOLDER_FILES_COUNT[i] = 0;
+                                                                }
+                                                                PAINT_IS_DRAWING = false;
+                                                                GUI_ELEMENTS_COUNT = 0;
+                                                                SELECTED_ELEMENT = 0;
+                                                                PREVIEW_RUNNING = false;
+                                                                PREVIEW_ELEMENTS_COUNT = 0;
+                                                                users::logout();
+                                                                draw_login_window(&mut gfx);
+                                                                redraw = true;
+                                                            }
+                                                            "Shutdown" => {
+                                                                gfx.clear(Color::BLACK.to_u32());
+                                                                gfx.draw_text(
+                                                                    (gfx.width - 16 * 17) / 2,
+                                                                    gfx.height / 2 - 8,
+                                                                    "Now you can turn off the power",
+                                                                    Color::WHITE.to_u32(),
+                                                                    Color::BLACK.to_u32()
+                                                                );
+                                                                gfx.flush();
+                                                                loop { core::arch::asm!("hlt") }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        wm.start_menu.open = false;
+                                                        redraw = true;
+                                                    } else if !wm.start_menu.contains(cursor_x, cursor_y, &gfx) {
+                                                        wm.start_menu.open = false;
+                                                        redraw = true;
+                                                    }
+                                                } else if cursor_y >= taskbar_y && cursor_x < 52 {
+                                                    wm.start_menu.open = true;
+                                                    redraw = true;
+                                                } else if wm.handle_mouse_press(&mut gfx, cursor_x, cursor_y) {
+                                                    redraw = true;
+                                                } else {
+                                                    // Обработка кликов по иконкам
+                                                    let mut icon_clicked = false;
+                                                    let icon_y = 50;
+                                                    let icon_size = 64;
+                                                    if cursor_y >= icon_y && cursor_y <= icon_y + icon_size {
+                                                        if cursor_x >= 50 && cursor_x <= 50 + icon_size {
+                                                            wm.create_window("Terminal", 100, 100, 500, 350);
+                                                            term_len = 0; clear_history();
+                                                            icon_clicked = true;
+                                                            redraw = true;
+                                                        } else if cursor_x >= 150 && cursor_x <= 150 + icon_size {
+                                                            wm.create_window("File Manager", 150, 120, 500, 350);
+                                                            icon_clicked = true;
+                                                            redraw = true;
+                                                        } else if cursor_x >= 250 && cursor_x <= 250 + icon_size {
+                                                            wm.create_window("Settings", 200, 180, 450, 370);
+                                                            icon_clicked = true;
+                                                            redraw = true;
+                                                        } else if cursor_x >= 350 && cursor_x <= 350 + icon_size {
+                                                            wm.create_window("AboutOS", 200, 100, 400, 350);
+                                                            icon_clicked = true;
+                                                            redraw = true;
+                                                        } else if cursor_x >= 450 && cursor_x <= 450 + icon_size {
+                                                            wm.create_window("Notepad", 100, 100, 500, 400);
+                                                            icon_clicked = true;
+                                                            redraw = true;
+                                                        } else if cursor_x >= 550 && cursor_x <= 550 + icon_size {
+                                                            wm.create_window("Paint", 100, 100, 420, 400);
+                                                            icon_clicked = true;
+                                                            redraw = true;
+                                                        } else if cursor_x >= 650 && cursor_x <= 650 + icon_size {
+                                                            wm.create_window("Cre Tool", 100, 100, 480, 400);
+                                                            icon_clicked = true;
+                                                            redraw = true;
+                                                            push_history("Cre Tool opened!");
+                                                        }
+                                                    }
+                                                    
+                                                    if !icon_clicked {
+                                                        // Остальная обработка
+                                                        let mut bmp_selected = false;
+                                                        for i in 0..wm.window_count {
+                                                            if let Some(ref win) = wm.windows[i] {
+                                                                if win.title == "BMP Wallpaper Selector" && win.state != WindowState::Minimized {
+                                                                    let wx = win.x + 2;
+                                                                    let wy = win.y + 26;
+                                                                    
+                                                                    for j in 0..3 {
+                                                                        let y_pos = wy + 30 + j * 60;
+                                                                        if cursor_x >= wx + 10 && cursor_x <= wx + 260 &&
+                                                                           cursor_y >= y_pos && cursor_y <= y_pos + 50 {
+                                                                            CURRENT_BMP_INDEX = j;
+                                                                            USE_BMP_WALLPAPER = true;
+                                                                            bmp_selected = true;
+                                                                            for k in i..wm.window_count - 1 {
+                                                                                wm.windows[k] = wm.windows[k + 1].take();
+                                                                            }
+                                                                            wm.windows[wm.window_count - 1] = None;
+                                                                            wm.window_count -= 1;
+                                                                            if wm.active_window == Some(i) || wm.active_window.is_none() {
+                                                                                wm.active_window = if wm.window_count > 0 { Some(wm.window_count - 1) } else { None };
+                                                                            }
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                    if bmp_selected { break; }
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        if bmp_selected {
+                                                            redraw = true;
+                                                            continue;
+                                                        }
+
+                                                        let mut wallpaper_changed = false;
+                                                        for i in 0..wm.window_count {
+                                                            if let Some(ref win) = wm.windows[i] {
+                                                                if win.title == "Wallpaper Selector" && win.state != WindowState::Minimized {
+                                                                    let wx = win.x + 2;
+                                                                    let wy = win.y + 26;
+                                                                    let colors = [
+                                                                        Color::rgb(89, 0, 255),
+                                                                        Color::rgb(0, 23, 128),
+                                                                        Color::rgb(192, 0, 0),
+                                                                        Color::rgb(192, 192, 0),
+                                                                        Color::rgb(0, 0, 128),
+                                                                        Color::rgb(128, 0, 128),
+                                                                    ];
+                                                                    for (j, _) in colors.iter().enumerate() {
+                                                                        let y_pos = wy + 30 + j * 30;
+                                                                        if cursor_x >= wx + 10 && cursor_x <= wx + 260 &&
+                                                                           cursor_y >= y_pos && cursor_y <= y_pos + 24 {
+                                                                            WALLPAPER = colors[j];
+                                                                            USE_BMP_WALLPAPER = false;
+                                                                            wallpaper_changed = true;
+                                                                            for k in i..wm.window_count - 1 { wm.windows[k] = wm.windows[k + 1].take(); }
+                                                                            wm.windows[wm.window_count - 1] = None;
+                                                                            wm.window_count -= 1;
+                                                                            if wm.active_window == Some(i) || wm.active_window.is_none() {
+                                                                                wm.active_window = if wm.window_count > 0 { Some(wm.window_count - 1) } else { None };
+                                                                            }
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                    if wallpaper_changed { break; }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if !wallpaper_changed {
+                                                            let mut theme_changed = false;
+                                                            for i in 0..wm.window_count {
+                                                                if let Some(ref win) = wm.windows[i] {
+                                                                    if win.title == "Theme Selector" && win.state != WindowState::Minimized {
+                                                                        let wx = win.x + 2;
+                                                                        let wy = win.y + 26;
+                                                                        for j in 0..3 {
+                                                                            let y_pos = wy + 30 + j * 30;
+                                                                            if cursor_x >= wx + 10 && cursor_x <= wx + 260 &&
+                                                                               cursor_y >= y_pos && cursor_y <= y_pos + 24 {
+                                                                                THEME_IDX = j;
+                                                                                wm::set_theme(j);
+                                                                                theme_changed = true;
+                                                                                for k in i..wm.window_count - 1 { wm.windows[k] = wm.windows[k + 1].take(); }
+                                                                                wm.windows[wm.window_count - 1] = None;
+                                                                                wm.window_count -= 1;
+                                                                                if wm.active_window == Some(i) || wm.active_window.is_none() {
+                                                                                    wm.active_window = if wm.window_count > 0 { Some(wm.window_count - 1) } else { None };
+                                                                                }
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                        if theme_changed { break; }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            if !theme_changed {
+                                                                if let Some(active) = wm.active_window {
+                                                                    if let Some(ref win) = wm.windows[active] {
+                                                                        if win.title == "Settings" && win.state != WindowState::Minimized {
+                                                                            let wx = win.x + 2;
+                                                                            let wy = win.y + 26;
+                                                                            let btn_wallpaper_y = wy + 45;
+                                                                            if cursor_x >= wx + 10 && cursor_x <= wx + 210 &&
+                                                                               cursor_y >= btn_wallpaper_y && cursor_y <= btn_wallpaper_y + 28 {
+                                                                                wm.create_window("Wallpaper Selector", 250, 200, 300, 250);
+                                                                                redraw = true;
+                                                                            }
+                                                                            let btn_theme_y = wy + 85;
+                                                                            if cursor_x >= wx + 10 && cursor_x <= wx + 210 &&
+                                                                               cursor_y >= btn_theme_y && cursor_y <= btn_theme_y + 28 {
+                                                                                wm.create_window("Theme Selector", 250, 200, 300, 180);
+                                                                                redraw = true;
+                                                                            }
+                                                                            let btn_bmp_y = wy + 125;
+                                                                            if cursor_x >= wx + 10 && cursor_x <= wx + 210 &&
+                                                                               cursor_y >= btn_bmp_y && cursor_y <= btn_bmp_y + 28 {
+                                                                                USE_BMP_WALLPAPER = !USE_BMP_WALLPAPER;
+                                                                                redraw = true;
+                                                                            }
+                                                                            let btn_wallpaper_select_y = wy + 165;
+                                                                            if cursor_x >= wx + 10 && cursor_x <= wx + 210 &&
+                                                                               cursor_y >= btn_wallpaper_select_y && cursor_y <= btn_wallpaper_select_y + 28 {
+                                                                                wm.create_window("BMP Wallpaper Selector", 200, 150, 300, 270);
+                                                                                redraw = true;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if !packet.left && left_prev {
+    // ====== ОТПУСКАНИЕ ПЕРЕТАСКИВАНИЯ ======
+    if DRAG_ACTIVE {
+        DRAG_ACTIVE = false;
+        redraw = true;
+    }
+    if RESIZE_ACTIVE {
+        RESIZE_ACTIVE = false;
+        redraw = true;
+    }
+    
+    wm.handle_mouse_release(&mut gfx);
+    redraw = true;
+
+                if need_flush {
+                    gfx.flush();
+                }
+
+                for _ in 0..5000 { unsafe { core::arch::asm!("nop") } }
+            }
+        }
+    }
+
+    loop {
+        unsafe { core::arch::asm!("hlt") }
+    }
+}
+
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! {
+    loop {}
+}
+
+} else if packet.left && (packet.dx != 0 || packet.dy != 0) {
+    if !wm.handle_mouse_move(&mut gfx, cursor_x, cursor_y) {
+        let mut resizing = false;
+        if let Some(active) = wm.active_window {
+            if let Some(ref win) = wm.windows[active] {
+                let resize_x = win.x + win.width - 15;
+                let resize_y = win.y + win.height - 15;
+                if cursor_x >= resize_x && cursor_x <= win.x + win.width &&
+                   cursor_y >= resize_y && cursor_y <= win.y + win.height {
+                    let new_width = (cursor_x - win.x + 5).max(200).min(800);
+                    let new_height = (cursor_y - win.y + 5).max(150).min(600);
+                    wm.resize_window(active, new_width, new_height);
+                    redraw = true;
+                    resizing = true;
+                }
+            }
+        }
+        if !resizing {
+            wm.handle_mouse_move(&mut gfx, cursor_x, cursor_y);
+        }
+    } else {
+        redraw = true;
+    }
+}

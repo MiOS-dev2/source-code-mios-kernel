@@ -1,1 +1,1 @@
-Welcome to MiOS!
+Welcome!
