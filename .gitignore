@@ -1,0 +1,14 @@
+target/
+*.o
+*.bin
+*.iso
+*.img
+*.tar
+*.log
+*.bak
+*.new
+rustc-ice-*.txt
+*.bat
+*.exe
+qemu.log
+grub2-themes/
