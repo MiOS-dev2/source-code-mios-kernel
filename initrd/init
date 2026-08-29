@@ -1,0 +1,21 @@
+#!/bin/sh
+# MiOS Modular Kernel Loader
+echo "Loading MiOS kernel parts..."
+
+# Mount virtual filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs dev /dev
+
+# Load each kernel part
+for part in core memory scheduler fs net drivers; do
+    echo "  Loading $part..."
+    if [ -f /kernel/$part/$part.elf ]; then
+        /bin/loader /kernel/$part/$part.elf
+    else
+        echo "    Warning: $part not found"
+    fi
+done
+
+echo "All kernel parts loaded!"
+exec /bin/sh
