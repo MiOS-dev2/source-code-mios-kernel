@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head><title></title></head>
+<body>
+
+<center><h1>MiUX Support Center</h1></center>
+<center><i>Version 7 - Help &amp; Documentation</i></center>
+<hr>
+
+<center><font color="blue">Welcome to the official MiUX support center!</font></center>
+<center>Use the arrows at the bottom to scroll through this page.</center>
+<hr>
+
+<h2>1. Getting Started</h2>
+<p>MiUX is a small hobby operating system written in Rust. This support
+center explains the main features and how to use them.</p>
+<ul>
+<li>Boot MiUX from GRUB or your bootloader</li>
+<li>Log in using one of the default accounts</li>
+<li>Use the Start menu to launch applications</li>
+<li>Open the terminal for advanced control</li>
+</ul>
+
+<h2>2. Default Users</h2>
+<p>MiUX ships with three pre-configured accounts:</p>
+<table>
+<tr><th>User</th><th>Password</th><th>Role</th></tr>
+<tr><td>admin</td><td>admin</td><td>Administrator</td></tr>
+<tr><td>system</td><td>system</td><td>System</td></tr>
+<tr><td>user</td><td>user</td><td>Regular user</td></tr>
+</table>
+
+<h2>3. Terminal Commands</h2>
+<p>Open the Terminal from the Start menu or the desktop icon. Then type
+<b>help</b> to see all commands.</p>
+<ul>
+<li><b>help</b> - list all commands</li>
+<li><b>ver</b> - show MiUX version</li>
+<li><b>about</b> - about MiUX</li>
+<li><b>fs</b> - filesystem information</li>
+<li><b>dir</b> - list directory</li>
+<li><b>whoami</b> - current user</li>
+<li><b>users</b> - list users</li>
+<li><b>html /start</b> - open the HTML viewer</li>
+<li><b>support</b> - open this support center</li>
+<li><b>media</b> - open the BMP image viewer</li>
+<li><b>gl /start</b> - open 3D gears demo</li>
+<li><b>task /start</b> - open Task Manager</li>
+<li><b>calendar /start</b> - open Calendar</li>
+<li><b>cre-tool</b> - open Cre Tool (app builder)</li>
+<li><b>ext4</b> - mount EXT4 filesystem</li>
+</ul>
+
+<h2>4. User Management</h2>
+<p>To add a new user (admin rights required):</p>
+<ul>
+<li><b>useradd &lt;name&gt; &lt;password&gt;</b> - create a regular user</li>
+<li><b>useradd &lt;name&gt; &lt;password&gt; admin</b> - create an admin</li>
+<li><b>userdel &lt;name&gt;</b> - delete a user</li>
+<li><b>passwd &lt;name&gt; &lt;new_password&gt;</b> - change password</li>
+</ul>
+
+<h2>5. Filesystem</h2>
+<p>MiUX supports FAT32 and EXT4 filesystems.</p>
+<ul>
+<li><b>mount &lt;disk_number&gt;</b> - mount a FAT32 disk</li>
+<li><b>ext4</b> - try to mount EXT4 on disk 0</li>
+<li><b>ext4ls</b> - list EXT4 root directory</li>
+<li><b>ext4cat &lt;file&gt;</b> - read an EXT4 file</li>
+<li><b>ext4info</b> - show EXT4 filesystem info</li>
+</ul>
+
+<h2>6. Applications</h2>
+<p>All built-in apps can be launched from the Start menu:</p>
+<ul>
+<li><b>Terminal</b> - command-line shell</li>
+<li><b>File Manager</b> - browse disks and files</li>
+<li><b>Notepad</b> - simple text editor</li>
+<li><b>Paint</b> - drawing application</li>
+<li><b>Settings</b> - wallpaper and theme options</li>
+<li><b>AboutOS</b> - system information</li>
+<li><b>Media</b> - BMP image viewer</li>
+<li><b>HTML Viewer</b> - HTML4 browser</li>
+<li><b>Support Center</b> - this page</li>
+<li><b>Task Manager</b> - running processes</li>
+<li><b>Calendar</b> - date and time</li>
+<li><b>GL Demo</b> - rotating 3D gears</li>
+<li><b>Cre Tool</b> - GUI app builder</li>
+</ul>
+
+<h2>7. Keyboard Shortcuts</h2>
+<ul>
+<li><b>Arrow Up / Down</b> - scroll this page (in HTML/Support windows)</li>
+<li><b>Click</b> buttons with the mouse</li>
+<li><b>Right click</b> on the desktop for context menu</li>
+<li><b>Click the clock</b> in the taskbar to open the clock window</li>
+</ul>
+
+<h2>8. Customization</h2>
+<p>Open <b>Settings</b> from the Start menu to:</p>
+<ul>
+<li>Change the desktop wallpaper (color or BMP)</li>
+<li>Switch between Aero, Aero Dark and Aero Cool themes</li>
+<li>Enable Live Wallpaper (auto-changing BMP wallpaper)</li>
+</ul>
+
+<h2>9. Troubleshooting</h2>
+<p>If something does not work:</p>
+<ul>
+<li>Make sure you are logged in as <b>admin</b> for administrative tasks</li>
+<li>Try <b>cls</b> in the terminal to clear the screen</li>
+<li>Reboot from the Start menu if the system becomes unresponsive</li>
+<li>Check the terminal output for error codes</li>
+</ul>
+
+<hr>
+<center><b>MiUX 7.0.0 - Support Center</b></center>
+<center>MiUX 2026</center>
+<center><i>(Based from MiUX WebView)</i></center>
+
+</body>
+</html>
