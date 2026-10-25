@@ -224,6 +224,6 @@ python3 tools/gen_fonts.py
 
 - Telegram: @mik_han3
 - Gmail: questions2027@gmail.com
-- Сайт: https://miux-system.vercel.app
+- Сайт: https://miux.freedev.app/
 
 *MDEVS (c) and Mikhail*
